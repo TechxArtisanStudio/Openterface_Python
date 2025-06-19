@@ -1,0 +1,5 @@
+python-ffmpeg == 2.0.12
+
+# windows
+# wmi == 1.5.1
+# pywin32 == 310
