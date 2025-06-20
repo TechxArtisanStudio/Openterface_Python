@@ -37,3 +37,4 @@ def setup_logger(name, level=logging.INFO, log_file=None):
 ui_logger = setup_logger("opf.ui", logging.INFO)
 core_logger = setup_logger("opf.core", logging.INFO)
 serial_logger = setup_logger("opf.serial", logging.INFO)
+hid_logger = setup_logger("opf.hid", logging.INFO)

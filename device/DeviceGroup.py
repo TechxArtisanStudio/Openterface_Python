@@ -3,14 +3,13 @@ from typing import Optional
 
 dataclass
 class UsbDevice:
-    name: str
+    DeviceID: str
     vendor_id: str
     product_id: str
     path: str
     serial: Optional[str] = None
 
 class DeviceGroup:
-    usb_path: str
     webcam: Optional[UsbDevice] = None
     audio_device: Optional[UsbDevice] = None
     serial_port: Optional[UsbDevice] = None
