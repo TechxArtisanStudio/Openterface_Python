@@ -1,19 +1,29 @@
-from dataclasses import dataclass
-from typing import Optional
-
-dataclass
 class UsbDevice:
-    DeviceID: str
-    vendor_id: str
-    product_id: str
-    path: str
-    serial: Optional[str] = None
+    camera_path: str
+    audio_path: str
+    serial_path: str
+    hid_path: str
+
+    camera_id: str
+    audio_id: str
+    serial_id: str
+    hid_id: str
+
+    def query_devicep_path_by_id(self, device_id: str , device_path: str):
+        if device_id 
 
 class DeviceGroup:
-    webcam: Optional[UsbDevice] = None
-    audio_device: Optional[UsbDevice] = None
-    serial_port: Optional[UsbDevice] = None
-    hid_device: Optional[UsbDevice] = None
+    def __init__(self):
+        self.usb_devices = []
 
-    def is_complete(self):
-        return self.webcam and self.audio_device and self.serial_port and self.hid_device
+    def add_usb_device(self, usb_device: UsbDevice):
+        self.usb_devices.append(usb_device)
+
+    def get_usb_devices(self):
+        return self.usb_devices
+
+    def clear_usb_devices(self):
+        self.usb_devices.clear()
+
+    def __repr__(self):
+        return f"DeviceGroup(usb_devices={self.usb_devices})"

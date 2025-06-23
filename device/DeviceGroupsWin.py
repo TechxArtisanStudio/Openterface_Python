@@ -222,32 +222,65 @@ def get_hardware_id_from_devinst(dev_inst):
 def CM_Get_Sibling(dnDevInstSibling, dnDevInstDev, ulFlags):
     return cfgmgr32.CM_Get_Sibling(dnDevInstSibling, dnDevInstDev, ulFlags)
 
-if __name__ == "__main__":
-    vid = "534d"
-    pid = "2109"
-    devices = find_usb_devices_with_vid_pid(vid, pid)
-
+def collect_device_hardware_ids(Serial_vid, Serial_pid, HID_vid, HID_pid):
+    """
+    According VID/PID find physical device, collect serial_port、HID、camera、audio device id
+    return device_hardware_id_list.
+    """
+    devices = find_usb_devices_with_vid_pid(HID_vid, HID_pid)
+    device_id_list = []
     if devices:
         for i, device in enumerate(devices, 1):
-            CoreLogger.info(f"\nDevice {i} Port Chain:")
+            device_hardware_id = {
+                "serial_port": "",
+                "HID": "",
+                "camera": "",
+                "audio": "",
+            }
+            CoreLogger.info(f"Device {i} Port Chain:")
             for j, dev_id in enumerate(device["port_chain"], 1):
                 CoreLogger.info(f"{j}. {dev_id}")
-            CoreLogger.info(f"\nDevice {i} Siblings (same parent):")
+            CoreLogger.info(f"Device {i} Serial port (same parent):")
             if device["siblings"]:
                 for k, sibling in enumerate(device["siblings"], 1):
-                    CoreLogger.info(f"{k}. Hardware ID: {sibling['hardware_id']}")
-                    CoreLogger.info(f"   Device ID: {sibling['device_id']}")
+                    if Serial_vid.upper() in sibling['hardware_id'] and Serial_pid.upper() in sibling['hardware_id']:
+                        CoreLogger.info(f"{k}. Hardware ID: {sibling['hardware_id']}")
+                        CoreLogger.info(f"   Device ID: {sibling['device_id']}")
+                        device_hardware_id["serial_port"] = sibling['device_id']
             else:
                 CoreLogger.info("No siblings found.")
-            CoreLogger.info(f"\nDevice {i} Children:")
+            CoreLogger.info(f"Device {i} Openterface child devices:")
             if device["children"]:
                 for l, child in enumerate(device["children"], 1):
-                    CoreLogger.info(f"{l}. Hardware ID: {child['hardware_id']}")
-                    CoreLogger.info(f"   Device ID: {child['device_id']}")
+                    if not ("&0002" in child['device_id'] or "&0004" in child['device_id']):
+                        CoreLogger.info(f"{l}. Hardware ID: {child['hardware_id']}")
+                        CoreLogger.info(f"   Device ID: {child['device_id']} (type: {type(child['device_id'])})")
+                        if "HID" in child['hardware_id']:
+                            device_hardware_id["HID"] = child['device_id']
+                        elif "MI_00" in child['hardware_id']:
+                            device_hardware_id["camera"] = child['device_id']
+                        elif "Audio" in child['hardware_id']:
+                            device_hardware_id["audio"] = child['device_id']
             else:
                 CoreLogger.info("No children found.")
+            device_id_list.append(device_hardware_id)
     else:
         CoreLogger.info("No devices found with the specified VID and PID.")
+    return device_id_list
 
 
+
+if __name__ == "__main__":
+    device_id_list = collect_device_hardware_ids("1a86", "7523", "534D", "2109")
+
+    for device_hardware_id in device_id_list:
+        for key, value in device_hardware_id.items():
+            if key == "serial_port":
+                CoreLogger.info(f"Serial Port Device ID: {value}")
+            elif key == "HID":
+                CoreLogger.info(f"HID Device ID: {value}")
+            elif key == "camera":
+                CoreLogger.info(f"Camera Device ID: {value}")
+            elif key == "audio":
+                CoreLogger.info(f"Audio Device ID: {value}")
 
