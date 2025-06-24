@@ -1,0 +1,13 @@
+setup.py
+src/device/DeviceGroup.py
+src/device/DeviceGroupsWin.py
+src/device/VideoFFmpeg.py
+src/device/VideoHID.py
+src/device/__init__.py
+src/device/config.py
+src/openterface_py.egg-info/PKG-INFO
+src/openterface_py.egg-info/SOURCES.txt
+src/openterface_py.egg-info/dependency_links.txt
+src/openterface_py.egg-info/top_level.txt
+src/utils/__init__.py
+src/utils/logger.py

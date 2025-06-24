@@ -1,7 +1,9 @@
+# setup.py
 from setuptools import setup, find_packages
 
 setup(
-    name='openterface_python',
-    packages=find_packages(),
-    version='0.1.0'
+    name='openterface_py',
+    packages=find_packages(where='src'),
+    package_dir={'': 'src'},
+    version='0.1.0',
 )

@@ -1,13 +1,13 @@
 import ctypes
 from ctypes import wintypes
 import re
-import utils
+from utils import logger
 import hid
-import VideoFFmpeg
+from device import VideoFFmpeg
 import serial.tools.list_ports
 
 
-CoreLogger = utils.core_logger
+CoreLogger = logger.core_logger
 
 # Constants
 DIGCF_PRESENT = 0x00000002
@@ -255,18 +255,18 @@ def collect_device_ids(Serial_vid, Serial_pid, HID_vid, HID_pid):
                 if j==2:
                     port_chain = tmp + dev_id[-1] + ".2"
                 
-            CoreLogger.info(f"Device {i} Serial port (same parent):")
+            # CoreLogger.info(f"Device {i} Serial port (same parent):")
             if device["siblings"]:
                 for k, sibling in enumerate(device["siblings"], 1):
                     if Serial_vid.upper() in sibling['hardware_id'] and Serial_pid.upper() in sibling['hardware_id']:
-                        CoreLogger.info(f"{k}. Hardware ID: {sibling['hardware_id']}")
-                        CoreLogger.info(f"   Device ID: {sibling['device_id']}")
                         device_hardware_info["serial_port"] = sibling['device_id']
                         device_hardware_info["serial_port_path"] = port_chain
+                        CoreLogger.info(f"{k}. Hardware ID: {sibling['hardware_id']}")
+                        CoreLogger.info(f"   Device ID: {sibling['device_id']}")
                         CoreLogger.info(f" Device location: {port_chain}")
             else:
                 CoreLogger.info("No siblings found.")
-            CoreLogger.info(f"Device {i} Openterface child devices:")
+            # CoreLogger.info(f"Device {i} Openterface child devices:")
             if device["children"]:
                 for l, child in enumerate(device["children"], 1):
                     if not ("&0002" in child['device_id'] or "&0004" in child['device_id']):
@@ -328,14 +328,14 @@ def match_device_path(device_info):
         CoreLogger.info(f"Matched camera Path: {device_info['camera_path']}")
         CoreLogger.info(f"Matched audio Path: {device_info['audio_path']}")
 
-def search_phycial_device():
-    device_info_list = collect_device_ids("1a86", "7523", "534D", "2109")
+def search_phycial_device(SerialVid, SerialPID, HIDVID, HIDPID):
+    device_info_list = collect_device_ids(SerialVid, SerialPID, HIDVID, HIDPID)
     for device_info in device_info_list:
         match_device_path(device_info)
     return device_info_list
 
 if __name__ == "__main__":
-    device_info_list = search_phycial_device()
+    device_info_list = search_phycial_device("1a86", "7523", "534D", "2109")
     for device_hardware_id in device_info_list:
         print("\n")
         for key, value in device_hardware_id.items():

@@ -14,9 +14,7 @@ def list_hid_devices(VID, PID):
             if isinstance(device['path'], bytes):
                 path_str = device['path'].decode(errors='replace')
             HIDLogger.info(f"  Path: {path_str} type: {type(path_str)}")
-
             
-
 if __name__ == "__main__":
     VID = 0x534d  # Example Vendor ID
     PID = 0x2109  # Example Product ID
