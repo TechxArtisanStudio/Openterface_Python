@@ -2,8 +2,9 @@ import ctypes
 from ctypes import wintypes
 import re
 import utils
-import serial.tools.list_ports
 import hid
+import VideoFFmpeg
+import serial.tools.list_ports
 
 
 CoreLogger = utils.core_logger
@@ -298,7 +299,17 @@ def find_HID_by_device_id(device_id):
             return device['path']
 
 def find_camera_audio_by_device_info(device_info):
-    device_info['camera']
+    devs = VideoFFmpeg.list_windows_devices()
+    camera_id = device_info['camera'].split('\\')[-1]
+    audio_id = device_info['audio'].rsplit('.', 1)[-1]
+    camera_path = ""
+    audio_path = ""
+    for i, dev in enumerate(devs):
+        if camera_id.lower() in dev:
+            camera_path = dev
+        if audio_id in dev:
+            audio_path = dev
+    return camera_path, audio_path
 
 def match_device_path(device_info):
     """
@@ -313,10 +324,19 @@ def match_device_path(device_info):
         device_info['HID_path'] = find_HID_by_device_id(device_info["HID"])
         CoreLogger.info(f"Matched HID Path: {device_info['HID_path']}")
     if device_info['camera'] and device_info['audio']:
-        pass
+        device_info['camera_path'], device_info['audio_path'] = find_camera_audio_by_device_info(device_info)
+        CoreLogger.info(f"Matched camera Path: {device_info['camera_path']}")
+        CoreLogger.info(f"Matched audio Path: {device_info['audio_path']}")
 
-if __name__ == "__main__":
+def search_phycial_device():
     device_info_list = collect_device_ids("1a86", "7523", "534D", "2109")
-
     for device_info in device_info_list:
         match_device_path(device_info)
+    return device_info_list
+
+if __name__ == "__main__":
+    device_info_list = search_phycial_device()
+    for device_hardware_id in device_info_list:
+        print("\n")
+        for key, value in device_hardware_id.items():
+            CoreLogger.info(f"{key} : {value}")
