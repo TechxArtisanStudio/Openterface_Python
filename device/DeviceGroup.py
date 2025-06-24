@@ -1,3 +1,8 @@
+import config
+if config.PLATFORM == "win32":
+    import DeviceGroupsWin
+
+
 class UsbDevice:
     camera_path: str
     audio_path: str

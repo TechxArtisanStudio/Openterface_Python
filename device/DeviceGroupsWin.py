@@ -2,6 +2,9 @@ import ctypes
 from ctypes import wintypes
 import re
 import utils
+import serial.tools.list_ports
+import hid
+
 
 CoreLogger = utils.core_logger
 
@@ -222,31 +225,44 @@ def get_hardware_id_from_devinst(dev_inst):
 def CM_Get_Sibling(dnDevInstSibling, dnDevInstDev, ulFlags):
     return cfgmgr32.CM_Get_Sibling(dnDevInstSibling, dnDevInstDev, ulFlags)
 
-def collect_device_hardware_ids(Serial_vid, Serial_pid, HID_vid, HID_pid):
+def collect_device_ids(Serial_vid, Serial_pid, HID_vid, HID_pid):
     """
     According VID/PID find physical device, collect serial_port、HID、camera、audio device id
     return device_hardware_id_list.
     """
     devices = find_usb_devices_with_vid_pid(HID_vid, HID_pid)
-    device_id_list = []
+    device_info_list = []
     if devices:
         for i, device in enumerate(devices, 1):
-            device_hardware_id = {
+            port_chain = ""
+            device_hardware_info = {
                 "serial_port": "",
+                "serial_port_path": "",
                 "HID": "",
+                "HID_path": b"",
                 "camera": "",
+                "camera_path": "",
                 "audio": "",
+                "audio_path": ""
             }
             CoreLogger.info(f"Device {i} Port Chain:")
+            tmp = ""
             for j, dev_id in enumerate(device["port_chain"], 1):
                 CoreLogger.info(f"{j}. {dev_id}")
+                if j ==1:
+                    tmp = str(int(dev_id[-1])+1) + "-"
+                if j==2:
+                    port_chain = tmp + dev_id[-1] + ".2"
+                
             CoreLogger.info(f"Device {i} Serial port (same parent):")
             if device["siblings"]:
                 for k, sibling in enumerate(device["siblings"], 1):
                     if Serial_vid.upper() in sibling['hardware_id'] and Serial_pid.upper() in sibling['hardware_id']:
                         CoreLogger.info(f"{k}. Hardware ID: {sibling['hardware_id']}")
                         CoreLogger.info(f"   Device ID: {sibling['device_id']}")
-                        device_hardware_id["serial_port"] = sibling['device_id']
+                        device_hardware_info["serial_port"] = sibling['device_id']
+                        device_hardware_info["serial_port_path"] = port_chain
+                        CoreLogger.info(f" Device location: {port_chain}")
             else:
                 CoreLogger.info("No siblings found.")
             CoreLogger.info(f"Device {i} Openterface child devices:")
@@ -256,31 +272,51 @@ def collect_device_hardware_ids(Serial_vid, Serial_pid, HID_vid, HID_pid):
                         CoreLogger.info(f"{l}. Hardware ID: {child['hardware_id']}")
                         CoreLogger.info(f"   Device ID: {child['device_id']} (type: {type(child['device_id'])})")
                         if "HID" in child['hardware_id']:
-                            device_hardware_id["HID"] = child['device_id']
+                            device_hardware_info["HID"] = child['device_id']
                         elif "MI_00" in child['hardware_id']:
-                            device_hardware_id["camera"] = child['device_id']
+                            device_hardware_info["camera"] = child['device_id']
                         elif "Audio" in child['hardware_id']:
-                            device_hardware_id["audio"] = child['device_id']
+                            device_hardware_info["audio"] = child['device_id']
             else:
                 CoreLogger.info("No children found.")
-            device_id_list.append(device_hardware_id)
+            device_info_list.append(device_hardware_info)
     else:
         CoreLogger.info("No devices found with the specified VID and PID.")
-    return device_id_list
+    return device_info_list
 
+def find_com_port_by_device_location(device_path):
+    ports = serial.tools.list_ports.comports()
+    for port in ports:
+        if port.location == device_path:
+            return port.name
 
+def find_HID_by_device_id(device_id):
+    InstanceID = device_id.split('\\')[-1]
+    for device in hid.enumerate():
+        path_str = device['path'].decode(errors='replace')
+        if InstanceID.lower() in path_str:
+            return device['path']
+
+def find_camera_audio_by_device_info(device_info):
+    device_info['camera']
+
+def match_device_path(device_info):
+    """
+    Match the device path based on the device ID.
+    This function is a placeholder and should be implemented based on specific requirements.
+    """
+    # Placeholder implementation
+    if device_info['serial_port']:
+        device_info['serial_port_path'] = find_com_port_by_device_location(device_info['serial_port_path'])
+        CoreLogger.info(f"Matched Serial Port Path: {device_info['serial_port_path']}")
+    if device_info["HID"]:
+        device_info['HID_path'] = find_HID_by_device_id(device_info["HID"])
+        CoreLogger.info(f"Matched HID Path: {device_info['HID_path']}")
+    if device_info['camera'] and device_info['audio']:
+        pass
 
 if __name__ == "__main__":
-    device_id_list = collect_device_hardware_ids("1a86", "7523", "534D", "2109")
+    device_info_list = collect_device_ids("1a86", "7523", "534D", "2109")
 
-    for device_hardware_id in device_id_list:
-        for key, value in device_hardware_id.items():
-            if key == "serial_port":
-                CoreLogger.info(f"Serial Port Device ID: {value}")
-            elif key == "HID":
-                CoreLogger.info(f"HID Device ID: {value}")
-            elif key == "camera":
-                CoreLogger.info(f"Camera Device ID: {value}")
-            elif key == "audio":
-                CoreLogger.info(f"Audio Device ID: {value}")
-
+    for device_info in device_info_list:
+        match_device_path(device_info)
