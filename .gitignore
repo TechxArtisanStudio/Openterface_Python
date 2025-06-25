@@ -1,2 +1,4 @@
 src/openterface_py.egg-info/
-src/*/__pycache_/
+src/*/__pycache__/
+src/*/*.sdp
+
