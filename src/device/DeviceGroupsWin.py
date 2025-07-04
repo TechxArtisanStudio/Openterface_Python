@@ -1,13 +1,25 @@
 import ctypes
 from ctypes import wintypes
 import re
+from typing import List, Any
 from utils import logger
 import hid
 from device import VideoFFmpeg
+from device.AbstractDeviceManager import AbstractDeviceManager, AbstractHotplugMonitor, DeviceInfo, DeviceSnapshot
 import serial.tools.list_ports
-
+import time
+import threading
+from datetime import datetime
+import copy
 
 CoreLogger = logger.core_logger
+
+# Global variables for hot-plugging detection
+_initial_device_snapshot = None
+_current_device_snapshot = None
+_hotplug_monitoring = False
+_hotplug_thread = None
+_hotplug_callbacks = []
 
 # Constants
 DIGCF_PRESENT = 0x00000002
@@ -253,7 +265,11 @@ def collect_device_ids(Serial_vid, Serial_pid, HID_vid, HID_pid):
                 if j ==1:
                     tmp = str(int(dev_id[-1])+1) + "-"
                 if j==2:
-                    port_chain = tmp + dev_id[-1] + ".2"
+                    port_chain = tmp + dev_id[-1]
+                if 2 < j < len(device["port_chain"]):
+                    port_chain += f"-{dev_id[-1]}"
+                if j == len(device["port_chain"]):
+                    port_chain += f".2"
                 
             # CoreLogger.info(f"Device {i} Serial port (same parent):")
             if device["siblings"]:
@@ -333,6 +349,376 @@ def search_phycial_device(SerialVid, SerialPID, HIDVID, HIDPID):
     for device_info in device_info_list:
         match_device_path(device_info)
     return device_info_list
+
+class WindowsDeviceManager(AbstractDeviceManager):
+    """Windows implementation of the abstract device manager"""
+    
+    def __init__(self, serial_vid: str, serial_pid: str, hid_vid: str, hid_pid: str):
+        super().__init__(serial_vid, serial_pid, hid_vid, hid_pid)
+    
+    def discover_devices(self) -> List[DeviceInfo]:
+        """Discover all devices matching the specified VID/PID on Windows"""
+        device_info_list = []
+        devices = find_usb_devices_with_vid_pid(self.hid_vid, self.hid_pid)
+        
+        if devices:
+            for i, device in enumerate(devices, 1):
+                port_chain = self._build_port_chain(device["port_chain"])
+                
+                device_info = DeviceInfo(
+                    port_chain=port_chain,
+                    platform_specific={'raw_device_data': device}
+                )
+                
+                # Process siblings (serial ports)
+                if device["siblings"]:
+                    for sibling in device["siblings"]:
+                        if self.serial_vid.upper() in sibling['hardware_id'] and self.serial_pid.upper() in sibling['hardware_id']:
+                            device_info.serial_port = sibling['device_id']
+                            device_info.serial_port_path = port_chain
+                
+                # Process children (HID, camera, audio)
+                if device["children"]:
+                    for child in device["children"]:
+                        if not ("&0002" in child['device_id'] or "&0004" in child['device_id']):
+                            if "HID" in child['hardware_id']:
+                                device_info.hid_device = child['device_id']
+                            elif "MI_00" in child['hardware_id']:
+                                device_info.camera_device = child['device_id']
+                            elif "Audio" in child['hardware_id']:
+                                device_info.audio_device = child['device_id']
+                
+                # Match device paths
+                self._match_device_paths(device_info)
+                device_info_list.append(device_info)
+        
+        return device_info_list
+    
+    def get_port_chain(self, device_identifier: Any) -> str:
+        """Get the port chain for a Windows device instance"""
+        if isinstance(device_identifier, int):
+            # Assume it's a device instance
+            return self._build_port_chain(get_port_chain(device_identifier))
+        return str(device_identifier)
+    
+    def _build_port_chain(self, raw_port_chain: list) -> str:
+        """Build a formatted port chain string from raw Windows data"""
+        if not raw_port_chain:
+            return ""
+        
+        port_chain = ""
+        tmp = ""
+        
+        for j, dev_id in enumerate(raw_port_chain, 1):
+            if j == 1:
+                tmp = str(int(dev_id[-1]) + 1) + "-"
+            if j == 2:
+                port_chain = tmp + dev_id[-1]
+            if 2 < j < len(raw_port_chain):
+                port_chain += f"-{dev_id[-1]}"
+            if j == len(raw_port_chain):
+                port_chain += ".2"
+        
+        return port_chain
+    
+    def _match_device_paths(self, device_info: DeviceInfo):
+        """Match Windows device paths for the device"""
+        # Match serial port
+        if device_info.serial_port:
+            device_info.serial_port_path = find_com_port_by_device_location(device_info.port_chain)
+        
+        # Match HID path
+        if device_info.hid_device:
+            device_info.hid_path = find_HID_by_device_id(device_info.hid_device)
+        
+        # Match camera and audio paths
+        if device_info.camera_device and device_info.audio_device:
+            camera_path, audio_path = find_camera_audio_by_device_info({
+                'camera': device_info.camera_device,
+                'audio': device_info.audio_device
+            })
+            device_info.camera_path = camera_path
+            device_info.audio_path = audio_path
+
+
+class WindowsHotplugMonitor(AbstractHotplugMonitor):
+    """Windows implementation of the abstract hotplug monitor"""
+    
+    def __init__(self, device_manager: WindowsDeviceManager, poll_interval: float = 2.0):
+        super().__init__(device_manager, poll_interval)
+    
+    def _create_monitor_thread(self):
+        """Create the Windows monitoring thread"""
+        return threading.Thread(target=self._monitor_loop, daemon=True)
+    
+    def _monitor_loop(self):
+        """Main monitoring loop for Windows"""
+        while self.running:
+            try:
+                # Capture current device state
+                current_snapshot = self.device_manager.create_snapshot()
+                
+                # Handle any changes
+                self._handle_device_changes(current_snapshot)
+                
+                # Wait for next poll
+                time.sleep(self.poll_interval)
+                
+            except Exception as e:
+                CoreLogger.error(f"Error in Windows hotplug monitoring loop: {e}")
+                time.sleep(self.poll_interval)
+
+
+# Legacy compatibility classes
+class HotplugMonitor(WindowsHotplugMonitor):
+    """Legacy compatibility class"""
+    
+    def __init__(self, serial_vid: str, serial_pid: str, hid_vid: str, hid_pid: str, poll_interval: float = 2.0):
+        device_manager = WindowsDeviceManager(serial_vid, serial_pid, hid_vid, hid_pid)
+        super().__init__(device_manager, poll_interval)
+
+
+class DeviceSnapshot:
+    """Legacy compatibility class"""
+    
+    def __init__(self, serial_vid: str, serial_pid: str, hid_vid: str, hid_pid: str):
+        self.timestamp = datetime.now()
+        self.serial_vid = serial_vid
+        self.serial_pid = serial_pid
+        self.hid_vid = hid_vid
+        self.hid_pid = hid_pid
+        
+        # Create device manager and get devices
+        device_manager = WindowsDeviceManager(serial_vid, serial_pid, hid_vid, hid_pid)
+        device_infos = device_manager.discover_devices()
+        
+        # Convert to legacy format
+        self.devices = [device.to_dict() for device in device_infos]
+        
+    def compare_with(self, other_snapshot):
+        """Compare this snapshot with another snapshot"""
+        changes = {
+            'added_devices': [],
+            'removed_devices': [],
+            'modified_devices': []
+        }
+        
+        # Convert device lists to dictionaries for easier comparison
+        current_devices = {self._device_key(dev): dev for dev in self.devices}
+        other_devices = {self._device_key(dev): dev for dev in other_snapshot.devices}
+        
+        # Find added devices
+        for key, device in current_devices.items():
+            if key not in other_devices:
+                changes['added_devices'].append(device)
+        
+        # Find removed devices
+        for key, device in other_devices.items():
+            if key not in current_devices:
+                changes['removed_devices'].append(device)
+        
+        # Find modified devices
+        for key, device in current_devices.items():
+            if key in other_devices:
+                if not self._devices_equal(device, other_devices[key]):
+                    changes['modified_devices'].append({
+                        'old': other_devices[key],
+                        'new': device
+                    })
+        
+        return changes
+    
+    def _device_key(self, device):
+        """Generate a unique key for a device"""
+        return f"{device.get('serial_port', '')}-{device.get('HID', '')}-{device.get('camera', '')}"
+    
+    def _devices_equal(self, dev1, dev2):
+        """Check if two devices are equal"""
+        for key in dev1.keys():
+            if dev1.get(key) != dev2.get(key):
+                return False
+        return True
+
+class HotplugMonitor:
+    """Monitor device hot-plugging events"""
+    
+    def __init__(self, serial_vid, serial_pid, hid_vid, hid_pid, poll_interval=2.0):
+        self.serial_vid = serial_vid
+        self.serial_pid = serial_pid
+        self.hid_vid = hid_vid
+        self.hid_pid = hid_pid
+        self.poll_interval = poll_interval
+        self.callbacks = []
+        self.running = False
+        self.thread = None
+        self.initial_snapshot = None
+        self.last_snapshot = None
+        
+    def add_callback(self, callback):
+        """Add a callback function to be called when device changes are detected"""
+        self.callbacks.append(callback)
+        
+    def remove_callback(self, callback):
+        """Remove a callback function"""
+        if callback in self.callbacks:
+            self.callbacks.remove(callback)
+    
+    def start_monitoring(self):
+        """Start monitoring for device changes"""
+        if self.running:
+            CoreLogger.warning("Hot-plug monitoring is already running")
+            return
+            
+        # Capture initial device state
+        self.initial_snapshot = DeviceSnapshot(
+            self.serial_vid, self.serial_pid,
+            self.hid_vid, self.hid_pid
+        )
+        self.last_snapshot = copy.deepcopy(self.initial_snapshot)
+        
+        CoreLogger.info(f"Initial device snapshot captured at {self.initial_snapshot.timestamp}")
+        CoreLogger.info(f"Found {len(self.initial_snapshot.devices)} initial devices")
+        
+        self.running = True
+        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread.start()
+        
+        CoreLogger.info("Hot-plug monitoring started")
+    
+    def stop_monitoring(self):
+        """Stop monitoring for device changes"""
+        if not self.running:
+            CoreLogger.warning("Hot-plug monitoring is not running")
+            return
+            
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=5.0)
+            
+        CoreLogger.info("Hot-plug monitoring stopped")
+    
+    def _monitor_loop(self):
+        """Main monitoring loop"""
+        while self.running:
+            try:
+                # Capture current device state
+                current_snapshot = DeviceSnapshot(
+                    self.serial_vid, self.serial_pid,
+                    self.hid_vid, self.hid_pid
+                )
+                
+                # Compare with last snapshot
+                changes = current_snapshot.compare_with(self.last_snapshot)
+                
+                # Check if there are any changes
+                if (changes['added_devices'] or 
+                    changes['removed_devices'] or 
+                    changes['modified_devices']):
+                    
+                    CoreLogger.info(f"Device changes detected at {current_snapshot.timestamp}")
+                    
+                    # Log changes
+                    if changes['added_devices']:
+                        CoreLogger.info(f"Added devices: {len(changes['added_devices'])}")
+                        for device in changes['added_devices']:
+                            CoreLogger.info(f"  + {self._format_device_info(device)}")
+                    
+                    if changes['removed_devices']:
+                        CoreLogger.info(f"Removed devices: {len(changes['removed_devices'])}")
+                        for device in changes['removed_devices']:
+                            CoreLogger.info(f"  - {self._format_device_info(device)}")
+                    
+                    if changes['modified_devices']:
+                        CoreLogger.info(f"Modified devices: {len(changes['modified_devices'])}")
+                        for change in changes['modified_devices']:
+                            CoreLogger.info(f"  ~ {self._format_device_info(change['new'])}")
+                    
+                    # Compare with initial snapshot
+                    initial_changes = current_snapshot.compare_with(self.initial_snapshot)
+                    
+                    # Call registered callbacks
+                    for callback in self.callbacks:
+                        try:
+                            callback({
+                                'timestamp': current_snapshot.timestamp,
+                                'current_devices': current_snapshot.devices,
+                                'changes_from_last': changes,
+                                'changes_from_initial': initial_changes,
+                                'initial_snapshot': self.initial_snapshot,
+                                'current_snapshot': current_snapshot
+                            })
+                        except Exception as e:
+                            CoreLogger.error(f"Error in hotplug callback: {e}")
+                
+                # Update last snapshot
+                self.last_snapshot = current_snapshot
+                
+                # Wait for next poll
+                time.sleep(self.poll_interval)
+                
+            except Exception as e:
+                CoreLogger.error(f"Error in hotplug monitoring loop: {e}")
+                time.sleep(self.poll_interval)
+    
+    def _format_device_info(self, device):
+        """Format device info for logging"""
+        parts = []
+        if device.get('serial_port_path'):
+            parts.append(f"Serial:{device['serial_port_path']}")
+        if device.get('HID_path'):
+            parts.append(f"HID:{device['HID_path']}")
+        if device.get('camera_path'):
+            parts.append(f"Camera:{device['camera_path']}")
+        if device.get('audio_path'):
+            parts.append(f"Audio:{device['audio_path']}")
+        return " | ".join(parts) if parts else "Unknown device"
+    
+    def get_current_state(self):
+        """Get current device state"""
+        if self.last_snapshot:
+            return {
+                'timestamp': self.last_snapshot.timestamp,
+                'devices': self.last_snapshot.devices,
+                'device_count': len(self.last_snapshot.devices)
+            }
+        return None
+    
+    def get_initial_state(self):
+        """Get initial device state"""
+        if self.initial_snapshot:
+            return {
+                'timestamp': self.initial_snapshot.timestamp,
+                'devices': self.initial_snapshot.devices,
+                'device_count': len(self.initial_snapshot.devices)
+            }
+        return None
+
+# Convenience functions for global hotplug monitoring
+def start_global_hotplug_monitoring(serial_vid, serial_pid, hid_vid, hid_pid, 
+                                   poll_interval=2.0, callback=None):
+    """Start global hotplug monitoring"""
+    global _hotplug_monitor
+    
+    _hotplug_monitor = HotplugMonitor(serial_vid, serial_pid, hid_vid, hid_pid, poll_interval)
+    
+    if callback:
+        _hotplug_monitor.add_callback(callback)
+    
+    _hotplug_monitor.start_monitoring()
+    return _hotplug_monitor
+
+def stop_global_hotplug_monitoring():
+    """Stop global hotplug monitoring"""
+    global _hotplug_monitor
+    
+    if '_hotplug_monitor' in globals() and _hotplug_monitor:
+        _hotplug_monitor.stop_monitoring()
+        _hotplug_monitor = None
+
+def get_global_hotplug_monitor():
+    """Get the global hotplug monitor instance"""
+    global _hotplug_monitor
+    return _hotplug_monitor if '_hotplug_monitor' in globals() else None
 
 if __name__ == "__main__":
     device_info_list = search_phycial_device("1a86", "7523", "534D", "2109")

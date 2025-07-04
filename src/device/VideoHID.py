@@ -1,7 +1,7 @@
 import hid
-import utils
+from utils import logger
 
-HIDLogger = utils.hid_logger
+HIDLogger = logger.hid_logger
 
 def list_hid_devices(VID, PID):
     for device in hid.enumerate():
