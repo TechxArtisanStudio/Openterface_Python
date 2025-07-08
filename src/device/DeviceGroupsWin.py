@@ -4,7 +4,7 @@ import re
 from typing import List, Any
 from utils import logger
 import hid
-from device import VideoFFmpeg
+from video import VideoFFmpeg
 from device.AbstractDeviceManager import AbstractDeviceManager, AbstractHotplugMonitor, DeviceInfo, DeviceSnapshot
 import serial.tools.list_ports
 import time
