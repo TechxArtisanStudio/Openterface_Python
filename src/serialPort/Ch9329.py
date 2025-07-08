@@ -8,7 +8,7 @@ CMD_GET_INFO = bytes.fromhex("57 AB 00 01 00")
 CMD_RESET = bytes.fromhex("57 AB 00 0F 00")
 CMD_SET_DEFAULT_CFG = bytes.fromhex("57 AB 00 0C 00")
 CMD_SET_USB_STRING_PREFIX = bytes.fromhex("57 AB 00 0B")
-CMD_SEND_KB_GENERAL_DATA = bytes.fromhex("57 AB 00 02 08 00 00 00 00 00 00 00 00")
+CMD_SEND_KB_GENERAL_DATA = bytes.fromhex("57 AB 00 02 08")
 CMD_SET_PARA_CFG_PREFIX = bytes.fromhex("57 AB 00 09 32 82 80 00 00 01 C2 00")
 CMD_SET_PARA_CFG_MID = bytes.fromhex("08 00 00 03 86 1a 29 e1 00 00 00 01 00 0d 00 00 00 00 00 00 00") + bytes(22)
 

@@ -11,7 +11,13 @@ class SerialManager:
     ORIGINAL_BAUDRATE = 9600
     DEFAULT_BAUDRATE = 115200
     CONNECTION_TIMEOUT = 2  # 2 seconds
-    MAX_RETRIES = 2
+    MAX_RETRIES = 3  # Increased retry count
+    MAX_RECONNECT_ATTEMPTS = 5  # Maximum reconnection attempts
+    RECONNECT_DELAY = 1.0  # Delay between reconnection attempts
+    
+    # Enhanced connection monitoring
+    HEALTH_CHECK_INTERVAL = 30  # Health check every 30 seconds
+    MAX_CONSECUTIVE_FAILURES = 3  # Max consecutive failures before declaring unhealthy
     
     def __init__(self):
         self.ser_port: Optional[serial.Serial] = None
@@ -19,6 +25,14 @@ class SerialManager:
         self.event_callback: Optional[Callable] = None
         self.is_switch_to_host = False
         self.is_target_usb_connected = False
+        
+        # Connection parameters for reconnection
+        self._last_port_path: Optional[str] = None
+        self._auto_reconnect: bool = True
+        self._connection_lost_count: int = 0
+        self._consecutive_failures: int = 0
+        self._last_health_check: float = 0.0
+        self._connection_health: str = "unknown"  # unknown, healthy, unhealthy, recovering
         
         # LED states
         self.num_lock_state = False
@@ -36,32 +50,91 @@ class SerialManager:
         # Initialize logging
         self.logger = logging.getLogger(__name__)
     
-    def connect(self, port_path: str, baudrate: int = None) -> bool:
-        """Connect to a specific serial port"""
-        if baudrate is None:
-            baudrate = self.DEFAULT_BAUDRATE
-            
-        self.logger.info(f"Connecting to serial port: {port_path} at {baudrate} baud")
+    def connect(self, port_path: str, baudrate: int = None, auto_reconnect: bool = True) -> bool:
+        """
+        Connect to a specific serial port with reconnection mechanism
         
-        # Try to open port with retries
+        Args:
+            port_path: Serial port path (e.g., "COM7", "/dev/ttyUSB0")
+            baudrate: Ignored - always uses 115200
+            auto_reconnect: Enable automatic reconnection on failure
+            
+        Returns:
+            bool: True if connected successfully
+        """
+        # Always force 115200 as the target baudrate, regardless of input
+        target_baudrate = self.DEFAULT_BAUDRATE
+        
+        self.logger.info(f"Connecting to serial port: {port_path} at {target_baudrate} baud")
+        
+        # Store connection parameters for reconnection
+        self._last_port_path = port_path
+        self._auto_reconnect = auto_reconnect
+        
+        for attempt in range(self.MAX_RECONNECT_ATTEMPTS):
+            if attempt > 0:
+                self.logger.info(f"Reconnection attempt {attempt + 1}/{self.MAX_RECONNECT_ATTEMPTS}")
+                time.sleep(self.RECONNECT_DELAY * attempt)  # Exponential backoff
+            
+            if self._attempt_connection(port_path, target_baudrate):
+                self.logger.info(f"Successfully connected to {port_path} at {target_baudrate} baud")
+                return True
+            
+            if not auto_reconnect:
+                break
+                
+        self.logger.error(f"Failed to connect to {port_path} after {self.MAX_RECONNECT_ATTEMPTS} attempts")
+        return False
+    
+    def _attempt_connection(self, port_path: str, target_baudrate: int) -> bool:
+        """
+        Attempt a single connection to the serial port
+        
+        Args:
+            port_path: Serial port path
+            target_baudrate: Target baudrate (115200)
+            
+        Returns:
+            bool: True if connection successful
+        """
+        # Clean up any existing connection
+        if self.ser_port:
+            self.close_port()
+        
+        # Try to open port with 115200 first (most common case)
         open_success = False
         for retry in range(self.MAX_RETRIES):
-            open_success = self.open_port(port_path, baudrate)
-            if open_success:
-                break
-            time.sleep(0.1)
+            try:
+                open_success = self.open_port(port_path, target_baudrate)
+                if open_success:
+                    break
+            except Exception as e:
+                self.logger.warning(f"Port open attempt {retry + 1} failed: {e}")
+            time.sleep(0.2)
         
         if not open_success:
-            self.logger.error(f"Failed to open serial port: {port_path}")
+            self.logger.warning(f"Failed to open serial port at {target_baudrate} baud")
             return False
         
-        # Send parameter configuration command to verify it's our device
-        ret_bytes = self.send_sync_command(CMD_GET_PARA_CFG, force=True)
-        device_responded = False
+        # Send parameter configuration command to verify it's our device at 115200
+        if self._verify_device_response():
+            return self._finalize_connection(port_path)
         
-        if ret_bytes:
-            try:
-                self.logger.debug(f"Received {len(ret_bytes)} bytes: {ret_bytes.hex(' ')}")
+        # If device didn't respond at 115200, it might be at 9600 - try to reconfigure it
+        self.logger.info("No response at 115200, attempting device reconfiguration from 9600...")
+        return self._reconfigure_device_from_9600(port_path, target_baudrate)
+    
+    def _verify_device_response(self) -> bool:
+        """
+        Verify that the device responds to commands
+        
+        Returns:
+            bool: True if device responds correctly
+        """
+        try:
+            ret_bytes = self.send_sync_command(CMD_GET_PARA_CFG, force=True, timeout=2.0)
+            if ret_bytes:
+                self.logger.debug(f"Device responded with {len(ret_bytes)} bytes: {ret_bytes.hex(' ')}")
                 
                 # Check if we have the minimum expected response
                 if len(ret_bytes) >= 7:
@@ -70,98 +143,162 @@ class SerialManager:
                         result = CmdDataResult(ret_bytes)
                         result.dump()
                         if result.data == DEF_CMD_SUCCESS:
-                            self.logger.info("Device responded successfully but with minimal data")
-                            device_responded = True
+                            self.logger.info("Device responded successfully")
+                            return True
                         else:
                             self.logger.warning(f"Device returned error code: {hex(result.data)}")
                             dump_error(result.data, ret_bytes)
-                            # Still consider this a valid device response
-                            device_responded = True
+                            return True  # Still a valid device response
                     elif len(ret_bytes) >= 55:
                         # Try to parse as full configuration
                         config = CmdDataParamConfig(ret_bytes)
                         config.dump()
                         self.logger.info("Device parameter configuration retrieved successfully")
-                        device_responded = True
+                        return True
                     else:
                         self.logger.warning(f"Unexpected response length: {len(ret_bytes)} bytes")
-                        self.logger.debug(f"Response data: {ret_bytes.hex(' ')}")
-                        # If we got any response with valid checksum, assume it's our device
-                        device_responded = True
+                        return True  # If we got any response with valid checksum, assume it's our device
                 else:
                     self.logger.error("Response too short to parse")
-            except Exception as e:
-                self.logger.error(f"Failed to parse parameter configuration: {e}")
-                self.logger.debug(f"Raw response ({len(ret_bytes)} bytes): {ret_bytes.hex(' ')}")
-                # Don't fail completely - if we got bytes, it might still be our device
-                device_responded = bool(ret_bytes)
-        
-        if not device_responded:
-            self.logger.warning("No response from device, trying with 9600 baudrate")
-            self.close_port()
-            
-            # Try with original baudrate
-            if self.open_port(port_path, self.ORIGINAL_BAUDRATE):
-                # First try factory reset which is simpler
-                self.logger.info("Trying factory reset first...")
-                reset_success = self.factory_reset_hid_chip()
-                if reset_success:
-                    self.logger.info("Factory reset successful, reconnecting...")
-                    self.close_port()
-                    time.sleep(2)  # Give device time to reset
-                    if self.open_port(port_path, baudrate):
-                        ret_bytes = self.send_sync_command(CMD_GET_PARA_CFG, force=True)
-                        if ret_bytes:
-                            try:
-                                self.logger.debug(f"After factory reset - received {len(ret_bytes)} bytes: {ret_bytes.hex(' ')}")
-                                device_responded = True
-                                self.logger.info("Device factory reset and connected successfully")
-                            except Exception as e:
-                                self.logger.error(f"Error parsing response after factory reset: {e}")
-                                self.close_port()
-                                return False
-                        else:
-                            self.close_port()
-                            return False
-                    else:
-                        return False
-                else:
-                    # If factory reset fails, try full reconfiguration
-                    if self.reconfigure_hid_chip():
-                        self.close_port()
-                        time.sleep(1)
-                        if self.open_port(port_path, baudrate):
-                            ret_bytes = self.send_sync_command(CMD_GET_PARA_CFG, force=True)
-                            if ret_bytes:
-                                try:
-                                    self.logger.debug(f"After reconfig - received {len(ret_bytes)} bytes: {ret_bytes.hex(' ')}")
-                                    device_responded = True
-                                    self.logger.info("Device reconfigured and connected successfully")
-                                except Exception as e:
-                                    self.logger.error(f"Error parsing response after reconfiguration: {e}")
-                                    self.close_port()
-                                    return False
-                            else:
-                                self.close_port()
-                                return False
-                        else:
-                            return False
-                    else:
-                        self.close_port()
-                        return False
+                    return False
             else:
+                self.logger.warning("No response from device")
                 return False
+        except Exception as e:
+            self.logger.error(f"Error verifying device response: {e}")
+            return False
+    
+    def _reconfigure_device_from_9600(self, port_path: str, target_baudrate: int) -> bool:
+        """
+        Reconfigure device from 9600 to 115200 baudrate
         
-        # Mark as ready and send initial status command
-        self.ready = True
-        if self.event_callback:
-            self.event_callback("connected", port_path)
+        Args:
+            port_path: Serial port path
+            target_baudrate: Target baudrate (115200)
+            
+        Returns:
+            bool: True if reconfiguration successful
+        """
+        self.close_port()
         
-        # Send info command to get device status
-        self.send_sync_command(CMD_GET_INFO, force=True)
+        # Try with original baudrate (9600)
+        if not self.open_port(port_path, self.ORIGINAL_BAUDRATE):
+            self.logger.error("Failed to open port at 9600 for reconfiguration")
+            return False
         
-        self.logger.info("Serial port connection completed successfully")
-        return True
+        self.logger.info("Device opened at 9600. Attempting reconfiguration to 115200...")
+        
+        # Try factory reset first (simpler and more reliable)
+        if self._try_factory_reset():
+            return self._reconnect_after_reset(port_path, target_baudrate)
+        
+        # If factory reset fails, try full reconfiguration
+        if self._try_full_reconfiguration():
+            return self._reconnect_after_reset(port_path, target_baudrate)
+        
+        self.logger.error("Failed to reconfigure device")
+        self.close_port()
+        return False
+    
+    def _try_factory_reset(self) -> bool:
+        """
+        Attempt factory reset of the device
+        
+        Returns:
+            bool: True if factory reset successful
+        """
+        try:
+            self.logger.info("Attempting factory reset...")
+            reset_success = self.factory_reset_hid_chip()
+            if reset_success:
+                self.logger.info("Factory reset completed successfully")
+                return True
+            else:
+                self.logger.warning("Factory reset failed")
+                return False
+        except Exception as e:
+            self.logger.error(f"Exception during factory reset: {e}")
+            return False
+    
+    def _try_full_reconfiguration(self) -> bool:
+        """
+        Attempt full device reconfiguration
+        
+        Returns:
+            bool: True if reconfiguration successful
+        """
+        try:
+            self.logger.info("Attempting full device reconfiguration...")
+            reconfig_success = self.reconfigure_hid_chip()
+            if reconfig_success:
+                self.logger.info("Full reconfiguration completed successfully")
+                return True
+            else:
+                self.logger.warning("Full reconfiguration failed")
+                return False
+        except Exception as e:
+            self.logger.error(f"Exception during reconfiguration: {e}")
+            return False
+    
+    def _reconnect_after_reset(self, port_path: str, target_baudrate: int) -> bool:
+        """
+        Reconnect to device after reset/reconfiguration
+        
+        Args:
+            port_path: Serial port path
+            target_baudrate: Target baudrate (115200)
+            
+        Returns:
+            bool: True if reconnection successful
+        """
+        self.close_port()
+        time.sleep(2)  # Give device time to reset
+        
+        # Attempt to reconnect at target baudrate
+        for retry in range(3):  # Multiple attempts after reset
+            try:
+                if self.open_port(port_path, target_baudrate):
+                    if self._verify_device_response():
+                        return self._finalize_connection(port_path)
+                    else:
+                        self.logger.warning(f"Device verification failed after reset (attempt {retry + 1})")
+                else:
+                    self.logger.warning(f"Failed to reopen port after reset (attempt {retry + 1})")
+            except Exception as e:
+                self.logger.warning(f"Exception during reconnection attempt {retry + 1}: {e}")
+            
+            time.sleep(1)  # Wait before retry
+        
+        self.logger.error("Failed to reconnect after device reset")
+        return False
+    
+    def _finalize_connection(self, port_path: str) -> bool:
+        """
+        Finalize the connection and set up the device
+        
+        Args:
+            port_path: Serial port path
+            
+        Returns:
+            bool: True if finalization successful
+        """
+        try:
+            # Verify we're actually at the target baudrate
+            if self.ser_port.baudrate != self.DEFAULT_BAUDRATE:
+                self.logger.warning(f"Port opened at {self.ser_port.baudrate} instead of {self.DEFAULT_BAUDRATE}")
+            
+            # Mark as ready and send initial status command
+            self.ready = True
+            if self.event_callback:
+                self.event_callback("connected", port_path)
+            
+            # Send info command to get device status
+            self.send_sync_command(CMD_GET_INFO, force=True)
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Error finalizing connection: {e}")
+            return False
     
     def open_port(self, device_path: str, baudrate: int = DEFAULT_BAUDRATE) -> bool:
         """Open serial port"""
@@ -209,10 +346,10 @@ class SerialManager:
             return False
         
         port_name = self.ser_port.name
-        baudrate = self.ser_port.baudrate
+        # Always use DEFAULT_BAUDRATE (115200) when restarting
         self.close_port()
         time.sleep(0.1)
-        return self.open_port(port_name, baudrate)
+        return self.open_port(port_name, self.DEFAULT_BAUDRATE)
     
     def write_data(self, data: bytes) -> bool:
         """Write data to serial port"""
@@ -364,51 +501,22 @@ class SerialManager:
         """Reconfigure HID chip to default baudrate and mode"""
         self.logger.info("Reconfiguring HID chip...")
         
-        # Build configuration command from scratch based on C++ implementation
-        # Command structure: [prefix] [addr] [cmd] [len] [mode] [cfg] [addr2] [baudrate] + config data
+        # Build configuration command using predefined constants from CH9329 protocol
+        # This follows the official protocol specification exactly
+        # Command structure: CMD_SET_PARA_CFG_PREFIX + baudrate + CMD_SET_PARA_CFG_MID
         cmd = bytearray()
         
-        # Header: 57 AB 00 09 32
-        cmd.extend(bytes.fromhex("57 AB 00 09 32"))
+        # Start with the predefined prefix: 57 AB 00 09 32 82 80 00 00 01 C2 00
+        # This contains: header, address, command, length, mode, and config bytes
+        cmd.extend(CMD_SET_PARA_CFG_PREFIX)
         
-        # Mode and config: 82 80 00 00
-        cmd.extend(bytes.fromhex("82 80 00 00"))
-        
-        # Baudrate (115200 as little endian 32-bit)
+        # Add baudrate (115200 as little endian 32-bit) - this is the only variable part
         cmd.extend(struct.pack('<I', 115200))
         
-        # Reserved 2 bytes
-        cmd.extend(RESERVED_2BYTES)
-        
-        # Package interval
-        cmd.extend(PACKAGE_INTERVAL)
-        
-        # VID (0x1a86 for CH340 - common for these devices)
-        cmd.extend(struct.pack('<H', 0x1a86))
-        
-        # PID (0x29e1 or similar)
-        cmd.extend(struct.pack('<H', 0x29e1))
-        
-        # Keyboard upload interval
-        cmd.extend(KEYBOARD_UPLOAD_INTERVAL)
-        
-        # Keyboard release timeout
-        cmd.extend(KEYBOARD_RELEASE_TIMEOUT)
-        
-        # Keyboard auto enter
-        cmd.extend(KEYBOARD_AUTO_ENTER)
-        
-        # Enter key configuration
-        cmd.extend(KEYBOARD_ENTER)
-        
-        # Filter
-        cmd.extend(FILTER)
-        
-        # Speed mode
-        cmd.extend(SPEED_MODE)
-        
-        # Reserved 4 bytes
-        cmd.extend(RESERVED_4BYTES)
+        # Add the predefined middle part which contains all other configuration
+        # This includes: reserved bytes, package interval, VID (0x1a86), PID (0x29e1), 
+        # keyboard settings, timeouts, filters, and padding
+        cmd.extend(CMD_SET_PARA_CFG_MID)
         
         # Send the command
         ret_bytes = self.send_sync_command(bytes(cmd), force=True)
@@ -507,3 +615,322 @@ class SerialManager:
     def __del__(self):
         """Destructor"""
         self.close_port()
+    
+    def send_keyboard_data(self, modifier_keys: int, key_codes: list) -> bool:
+        """
+        Send keyboard data to the device
+        
+        Args:
+            modifier_keys: Bitmask for modifier keys according to CH9329 specification:
+                           Bit 0: Left Ctrl, Bit 1: Left Shift, Bit 2: Left Alt, Bit 3: Left Windows
+                           Bit 4: Right Ctrl, Bit 5: Right Shift, Bit 6: Right Alt, Bit 7: Right Windows
+            key_codes: List of up to 6 key codes to send (HID usage codes)
+        
+        Returns:
+            bool: True if command was sent successfully
+        """
+
+        # Ensure we don't exceed 6 key codes
+        key_codes = key_codes[:6]
+        
+        # Pad with zeros if less than 6 keys
+        while len(key_codes) < 6:
+            key_codes.append(0)
+        
+        # Build keyboard command according to CH9329 specification:
+        # HEAD: 0x57 0xAB, ADDR: 0x00, CMD: 0x02, LEN: 0x08
+        # DATA: modifier_keys + 0x00 (reserved) + 6 key codes
+        cmd = bytearray(CMD_SEND_KB_GENERAL_DATA)  # This is now "57 AB 00 02 08"
+        cmd.append(modifier_keys)    # Byte 0: Modifier keys
+        cmd.append(0x00)             # Byte 1: Reserved, always 0x00
+        
+        # Bytes 2-7: Up to 6 key codes
+        for key_code in key_codes:
+            cmd.append(key_code)
+        
+        return self.send_async_command(bytes(cmd), force=True)
+    
+    def send_key_press(self, key_code: int, modifier_keys: int = 0) -> bool:
+        """
+        Send a single key press
+        
+        Args:
+            key_code: The key code to press
+            modifier_keys: Optional modifier keys (Ctrl=0x01, Shift=0x02, Alt=0x04, GUI=0x08)
+        
+        Returns:
+            bool: True if successful
+        """
+        # Send key press
+        success = self.send_keyboard_data(modifier_keys, [key_code])
+        if success:
+            time.sleep(0.05)  # Small delay
+            # Send key release
+            success = self.send_keyboard_data(0, [])
+        return success
+    
+    def send_text(self, text: str) -> bool:
+        """
+        Send text by converting to key codes
+        
+        Args:
+            text: Text to send
+        
+        Returns:
+            bool: True if successful
+        """
+        if not self.is_ready():
+            return False
+        
+        for char in text:
+            key_code, modifier = self._char_to_keycode(char)
+            if key_code:
+                if not self.send_key_press(key_code, modifier):
+                    return False
+                time.sleep(0.02)  # Small delay between characters
+        
+        return True
+    
+    def _char_to_keycode(self, char: str) -> tuple:
+        """
+        Convert a character to HID key code and modifier
+        
+        Args:
+            char: Character to convert
+        
+        Returns:
+            tuple: (key_code, modifier)
+        """
+        # Basic ASCII to HID key code mapping
+        char_map = {
+            'a': (0x04, 0), 'b': (0x05, 0), 'c': (0x06, 0), 'd': (0x07, 0), 'e': (0x08, 0),
+            'f': (0x09, 0), 'g': (0x0A, 0), 'h': (0x0B, 0), 'i': (0x0C, 0), 'j': (0x0D, 0),
+            'k': (0x0E, 0), 'l': (0x0F, 0), 'm': (0x10, 0), 'n': (0x11, 0), 'o': (0x12, 0),
+            'p': (0x13, 0), 'q': (0x14, 0), 'r': (0x15, 0), 's': (0x16, 0), 't': (0x17, 0),
+            'u': (0x18, 0), 'v': (0x19, 0), 'w': (0x1A, 0), 'x': (0x1B, 0), 'y': (0x1C, 0),
+            'z': (0x1D, 0),
+            
+            'A': (0x04, 0x02), 'B': (0x05, 0x02), 'C': (0x06, 0x02), 'D': (0x07, 0x02), 'E': (0x08, 0x02),
+            'F': (0x09, 0x02), 'G': (0x0A, 0x02), 'H': (0x0B, 0x02), 'I': (0x0C, 0x02), 'J': (0x0D, 0x02),
+            'K': (0x0E, 0x02), 'L': (0x0F, 0x02), 'M': (0x10, 0x02), 'N': (0x11, 0x02), 'O': (0x12, 0x02),
+            'P': (0x13, 0x02), 'Q': (0x14, 0x02), 'R': (0x15, 0x02), 'S': (0x16, 0x02), 'T': (0x17, 0x02),
+            'U': (0x18, 0x02), 'V': (0x19, 0x02), 'W': (0x1A, 0x02), 'X': (0x1B, 0x02), 'Y': (0x1C, 0x02),
+            'Z': (0x1D, 0x02),
+            
+            '1': (0x1E, 0), '2': (0x1F, 0), '3': (0x20, 0), '4': (0x21, 0), '5': (0x22, 0),
+            '6': (0x23, 0), '7': (0x24, 0), '8': (0x25, 0), '9': (0x26, 0), '0': (0x27, 0),
+            
+            '!': (0x1E, 0x02), '@': (0x1F, 0x02), '#': (0x20, 0x02), '$': (0x21, 0x02), '%': (0x22, 0x02),
+            '^': (0x23, 0x02), '&': (0x24, 0x02), '*': (0x25, 0x02), '(': (0x26, 0x02), ')': (0x27, 0x02),
+            
+            '\n': (0x28, 0),  # Enter
+            '\t': (0x2B, 0),  # Tab
+            ' ': (0x2C, 0),   # Space
+            '-': (0x2D, 0), '_': (0x2D, 0x02),
+            '=': (0x2E, 0), '+': (0x2E, 0x02),
+            '[': (0x2F, 0), '{': (0x2F, 0x02),
+            ']': (0x30, 0), '}': (0x30, 0x02),
+            '\\': (0x31, 0), '|': (0x31, 0x02),
+            ';': (0x33, 0), ':': (0x33, 0x02),
+            "'": (0x34, 0), '"': (0x34, 0x02),
+            '`': (0x35, 0), '~': (0x35, 0x02),
+            ',': (0x36, 0), '<': (0x36, 0x02),
+            '.': (0x37, 0), '>': (0x37, 0x02),
+            '/': (0x38, 0), '?': (0x38, 0x02),
+        }
+        
+        return char_map.get(char, (0, 0))
+    
+    def send_key_combination(self, *keys) -> bool:
+        """
+        Send a key combination (e.g., Ctrl+C, Alt+Tab)
+        
+        Args:
+            *keys: Key names like 'ctrl', 'alt', 'shift', 'a', 'c', etc.
+        
+        Returns:
+            bool: True if successful
+        """
+        modifier = 0
+        key_codes = []
+        
+        # Special key mappings (HID usage codes)
+        special_keys = {
+            'enter': 0x28, 'return': 0x28,
+            'esc': 0x29, 'escape': 0x29,
+            'backspace': 0x2A,
+            'tab': 0x2B,
+            'space': 0x2C,
+            'capslock': 0x39,
+            'f1': 0x3A, 'f2': 0x3B, 'f3': 0x3C, 'f4': 0x3D, 'f5': 0x3E, 'f6': 0x3F,
+            'f7': 0x40, 'f8': 0x41, 'f9': 0x42, 'f10': 0x43, 'f11': 0x44, 'f12': 0x45,
+            'up': 0x52, 'down': 0x51, 'left': 0x50, 'right': 0x4F,
+            'home': 0x4A, 'end': 0x4D, 'pageup': 0x4B, 'pagedown': 0x4E,
+            'delete': 0x4C, 'insert': 0x49,
+        }
+        
+        for key in keys:
+            key = key.lower()
+            # CH9329 modifier bit mapping:
+            # Bit 0: Left Ctrl, Bit 1: Left Shift, Bit 2: Left Alt, Bit 3: Left Windows
+            # Bit 4: Right Ctrl, Bit 5: Right Shift, Bit 6: Right Alt, Bit 7: Right Windows
+            if key in ['ctrl', 'control']:
+                modifier |= 0x01  # Left Ctrl
+            elif key == 'shift':
+                modifier |= 0x02  # Left Shift
+            elif key == 'alt':
+                modifier |= 0x04  # Left Alt
+            elif key in ['gui', 'win', 'cmd']:
+                modifier |= 0x08  # Left Windows
+            elif key == 'rctrl':
+                modifier |= 0x10  # Right Ctrl
+            elif key == 'rshift':
+                modifier |= 0x20  # Right Shift
+            elif key == 'ralt':
+                modifier |= 0x40  # Right Alt
+            elif key == 'rwin':
+                modifier |= 0x80  # Right Windows
+            elif key in special_keys:
+                key_codes.append(special_keys[key])
+            elif len(key) == 1:
+                key_code, key_modifier = self._char_to_keycode(key)
+                if key_code:
+                    key_codes.append(key_code)
+                    modifier |= key_modifier
+        
+        # Send key combination
+        success = self.send_keyboard_data(modifier, key_codes)
+        if success:
+            time.sleep(0.05)
+            # Release keys
+            success = self.send_keyboard_data(0, [])
+        
+        return success
+    
+    def send_mouse_move_relative(self, delta_x: int, delta_y: int, buttons: int = 0) -> bool:
+        """
+        Send relative mouse movement
+        
+        Args:
+            delta_x: X movement (-127 to 127)
+            delta_y: Y movement (-127 to 127)
+            buttons: Mouse button state (bit 0=left, bit 1=right, bit 2=middle)
+        
+        Returns:
+            bool: True if successful
+        """
+        if not self.is_ready():
+            self.logger.error("Device not ready for mouse input")
+            return False
+        
+        # Clamp values to valid range
+        delta_x = max(-127, min(127, delta_x))
+        delta_y = max(-127, min(127, delta_y))
+        
+        # Convert negative values to signed bytes
+        if delta_x < 0:
+            delta_x = 256 + delta_x
+        if delta_y < 0:
+            delta_y = 256 + delta_y
+        
+        # Build mouse relative movement command
+        cmd = bytearray(MOUSE_REL_ACTION_PREFIX)
+        cmd.extend([buttons, delta_x, delta_y, 0])  # buttons, x, y, wheel
+        
+        return self.send_async_command(bytes(cmd), force=True)
+    
+    def send_mouse_move_absolute(self, x: int, y: int, buttons: int = 0) -> bool:
+        """
+        Send absolute mouse positioning
+        
+        Args:
+            x: X coordinate (0-32767)
+            y: Y coordinate (0-32767)
+            buttons: Mouse button state (bit 0=left, bit 1=right, bit 2=middle)
+        
+        Returns:
+            bool: True if successful
+        """
+        if not self.is_ready():
+            self.logger.error("Device not ready for mouse input")
+            return False
+        
+        # Clamp values to valid range
+        x = max(0, min(32767, x))
+        y = max(0, min(32767, y))
+        
+        # Convert to little endian 16-bit values
+        x_bytes = struct.pack('<H', x)
+        y_bytes = struct.pack('<H', y)
+        
+        # Build mouse absolute positioning command
+        cmd = bytearray(MOUSE_ABS_ACTION_PREFIX)
+        cmd.extend([buttons])  # Mouse buttons
+        cmd.extend(x_bytes)    # X coordinate (2 bytes)
+        cmd.extend(y_bytes)    # Y coordinate (2 bytes)
+        cmd.extend([0])        # Wheel
+        
+        return self.send_async_command(bytes(cmd), force=True)
+    
+    def send_mouse_click(self, button: str = "left", double_click: bool = False) -> bool:
+        """
+        Send mouse click
+        
+        Args:
+            button: "left", "right", or "middle"
+            double_click: Whether to perform a double click
+        
+        Returns:
+            bool: True if successful
+        """
+        button_map = {
+            "left": 0x01,
+            "right": 0x02,
+            "middle": 0x04
+        }
+        
+        button_code = button_map.get(button.lower(), 0x01)
+        
+        # Press button
+        success = self.send_mouse_move_relative(0, 0, button_code)
+        if success:
+            time.sleep(0.05)
+            # Release button
+            success = self.send_mouse_move_relative(0, 0, 0)
+            
+            if double_click and success:
+                time.sleep(0.05)
+                # Second click
+                success = self.send_mouse_move_relative(0, 0, button_code)
+                if success:
+                    time.sleep(0.05)
+                    success = self.send_mouse_move_relative(0, 0, 0)
+        
+        return success
+    
+    def send_mouse_scroll(self, scroll_delta: int) -> bool:
+        """
+        Send mouse scroll wheel movement
+        
+        Args:
+            scroll_delta: Scroll amount (-127 to 127, positive = up, negative = down)
+        
+        Returns:
+            bool: True if successful
+        """
+        if not self.is_ready():
+            return False
+        
+        # Clamp to valid range
+        scroll_delta = max(-127, min(127, scroll_delta))
+        
+        # Convert negative values to signed bytes
+        if scroll_delta < 0:
+            scroll_delta = 256 + scroll_delta
+        
+        # Build mouse scroll command
+        cmd = bytearray(MOUSE_REL_ACTION_PREFIX)
+        cmd.extend([0, 0, 0, scroll_delta])  # buttons=0, x=0, y=0, wheel=scroll_delta
+        
+        return self.send_async_command(bytes(cmd), force=True)
+    
