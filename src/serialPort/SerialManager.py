@@ -12,12 +12,6 @@ class SerialManager:
     DEFAULT_BAUDRATE = 115200
     CONNECTION_TIMEOUT = 2  # 2 seconds
     MAX_RETRIES = 3  # Increased retry count
-    MAX_RECONNECT_ATTEMPTS = 5  # Maximum reconnection attempts
-    RECONNECT_DELAY = 1.0  # Delay between reconnection attempts
-    
-    # Enhanced connection monitoring
-    HEALTH_CHECK_INTERVAL = 30  # Health check every 30 seconds
-    MAX_CONSECUTIVE_FAILURES = 3  # Max consecutive failures before declaring unhealthy
     
     def __init__(self):
         self.ser_port: Optional[serial.Serial] = None
@@ -25,14 +19,6 @@ class SerialManager:
         self.event_callback: Optional[Callable] = None
         self.is_switch_to_host = False
         self.is_target_usb_connected = False
-        
-        # Connection parameters for reconnection
-        self._last_port_path: Optional[str] = None
-        self._auto_reconnect: bool = True
-        self._connection_lost_count: int = 0
-        self._consecutive_failures: int = 0
-        self._last_health_check: float = 0.0
-        self._connection_health: str = "unknown"  # unknown, healthy, unhealthy, recovering
         
         # LED states
         self.num_lock_state = False
@@ -50,14 +36,13 @@ class SerialManager:
         # Initialize logging
         self.logger = logging.getLogger(__name__)
     
-    def connect(self, port_path: str, baudrate: int = None, auto_reconnect: bool = True) -> bool:
+    def connect(self, port_path: str, baudrate: int = None) -> bool:
         """
-        Connect to a specific serial port with reconnection mechanism
+        Connect to a specific serial port
         
         Args:
             port_path: Serial port path (e.g., "COM7", "/dev/ttyUSB0")
             baudrate: Ignored - always uses 115200
-            auto_reconnect: Enable automatic reconnection on failure
             
         Returns:
             bool: True if connected successfully
@@ -67,25 +52,42 @@ class SerialManager:
         
         self.logger.info(f"Connecting to serial port: {port_path} at {target_baudrate} baud")
         
-        # Store connection parameters for reconnection
-        self._last_port_path = port_path
-        self._auto_reconnect = auto_reconnect
-        
-        for attempt in range(self.MAX_RECONNECT_ATTEMPTS):
-            if attempt > 0:
-                self.logger.info(f"Reconnection attempt {attempt + 1}/{self.MAX_RECONNECT_ATTEMPTS}")
-                time.sleep(self.RECONNECT_DELAY * attempt)  # Exponential backoff
-            
-            if self._attempt_connection(port_path, target_baudrate):
-                self.logger.info(f"Successfully connected to {port_path} at {target_baudrate} baud")
-                return True
-            
-            if not auto_reconnect:
-                break
-                
-        self.logger.error(f"Failed to connect to {port_path} after {self.MAX_RECONNECT_ATTEMPTS} attempts")
-        return False
+        if self._attempt_connection(port_path, target_baudrate):
+            self.logger.info(f"Successfully connected to {port_path} at {target_baudrate} baud")
+            return True
+        else:
+            self.logger.error(f"Failed to connect to {port_path}")
+            return False
     
+    def _parse_config_baud_mode(self, config_bytes: bytes):
+        """
+        Parse baudrate and mode from CMD_GET_PARA_CFG response (see ch9329_en.md)
+        Returns (baudrate, working_mode, serial_mode) or (None, None, None) if parse fails
+        
+        According to CH9329 protocol:
+        - Byte 5: Working Mode (0x00-0x03 software, 0x80-0x83 hardware)  
+        - Byte 6: Serial Communication Mode (0x00-0x02 software, 0x80-0x82 hardware)
+        - Byte 7: Serial Communication Address
+        - Bytes 8-11: Baudrate (high byte first, big endian)
+        """
+        try:
+            if len(config_bytes) >= 56:  # Need at least 56 bytes for full config
+                # Skip the header (57 AB 00 88 32) and get to the data portion
+                data_start = 5  # Start after header
+                working_mode = config_bytes[data_start]      # Byte 0 of data
+                serial_mode = config_bytes[data_start + 1]   # Byte 1 of data
+                address = config_bytes[data_start + 2]       # Byte 2 of data
+                
+                # Bytes 3-6 of data contain baudrate (big endian)
+                baud_bytes = config_bytes[data_start + 3:data_start + 7]
+                baudrate = int.from_bytes(baud_bytes, byteorder='big')
+                
+                self.logger.debug(f"Parsed config: working_mode=0x{working_mode:02X}, serial_mode=0x{serial_mode:02X}, address=0x{address:02X}, baudrate={baudrate}")
+                return baudrate, working_mode, serial_mode
+        except Exception as e:
+            self.logger.error(f"Failed to parse config: {e}")
+        return None, None, None
+
     def _attempt_connection(self, port_path: str, target_baudrate: int) -> bool:
         """
         Attempt a single connection to the serial port
@@ -111,18 +113,42 @@ class SerialManager:
             except Exception as e:
                 self.logger.warning(f"Port open attempt {retry + 1} failed: {e}")
             time.sleep(0.2)
-        
         if not open_success:
             self.logger.warning(f"Failed to open serial port at {target_baudrate} baud")
             return False
-        
-        # Send parameter configuration command to verify it's our device at 115200
-        if self._verify_device_response():
-            return self._finalize_connection(port_path)
-        
-        # If device didn't respond at 115200, it might be at 9600 - try to reconfigure it
-        self.logger.info("No response at 115200, attempting device reconfiguration from 9600...")
-        return self._reconfigure_device_from_9600(port_path, target_baudrate)
+
+        # Send CMD_GET_PARA_CFG and check baudrate/mode
+        ret_bytes = self.send_sync_command(CMD_GET_PARA_CFG, force=True, timeout=2.0)
+        if ret_bytes and len(ret_bytes) >= 56:
+            baudrate, working_mode, serial_mode = self._parse_config_baud_mode(ret_bytes)
+            self.logger.info(f"Device config: baudrate={baudrate}, working_mode=0x{working_mode:02X}, serial_mode=0x{serial_mode:02X}")
+            
+            # Check if baudrate is correct and we're in protocol mode (0x00 or 0x80)
+            if baudrate == target_baudrate and (serial_mode == 0x00 or serial_mode == 0x80):
+                self.logger.info("Device already configured correctly")
+                return self._finalize_connection(port_path)
+            else:
+                self.logger.warning(f"Device baudrate/mode incorrect, resetting HID chip...")
+                if self.reset_hid_chip():
+                    # Re-verify after reset
+                    ret_bytes2 = self.send_sync_command(CMD_GET_PARA_CFG, force=True, timeout=2.0)
+                    if ret_bytes2:
+                        baudrate2, working_mode2, serial_mode2 = self._parse_config_baud_mode(ret_bytes2)
+                        self.logger.info(f"After reset - baudrate={baudrate2}, working_mode=0x{working_mode2:02X}, serial_mode=0x{serial_mode2:02X}")
+                        if baudrate2 == target_baudrate and (serial_mode2 == 0x00 or serial_mode2 == 0x80):
+                            return self._finalize_connection(port_path)
+                        else:
+                            self.logger.error(f"Device config still incorrect after reset")
+                            return False
+                    else:
+                        self.logger.error("No response after reset")
+                        return False
+                else:
+                    self.logger.error("Failed to reset HID chip")
+                    return False
+        else:
+            self.logger.warning("No valid config response at 115200, attempting device reconfiguration from 9600...")
+            return self._reconfigure_device_from_9600(port_path, target_baudrate)
     
     def _verify_device_response(self) -> bool:
         """
@@ -255,19 +281,16 @@ class SerialManager:
         time.sleep(2)  # Give device time to reset
         
         # Attempt to reconnect at target baudrate
-        for retry in range(3):  # Multiple attempts after reset
-            try:
-                if self.open_port(port_path, target_baudrate):
-                    if self._verify_device_response():
-                        return self._finalize_connection(port_path)
-                    else:
-                        self.logger.warning(f"Device verification failed after reset (attempt {retry + 1})")
+        try:
+            if self.open_port(port_path, target_baudrate):
+                if self._verify_device_response():
+                    return self._finalize_connection(port_path)
                 else:
-                    self.logger.warning(f"Failed to reopen port after reset (attempt {retry + 1})")
-            except Exception as e:
-                self.logger.warning(f"Exception during reconnection attempt {retry + 1}: {e}")
-            
-            time.sleep(1)  # Wait before retry
+                    self.logger.warning("Device verification failed after reset")
+            else:
+                self.logger.warning("Failed to reopen port after reset")
+        except Exception as e:
+            self.logger.warning(f"Exception during reconnection: {e}")
         
         self.logger.error("Failed to reconnect after device reset")
         return False
@@ -320,6 +343,11 @@ class SerialManager:
                 timeout=self.CONNECTION_TIMEOUT,
                 write_timeout=self.CONNECTION_TIMEOUT
             )
+            
+            # Set RTS to low after opening the port
+            self.ser_port.rts = False
+            self.logger.debug(f"Set RTS to low on {device_path}")
+            
             self.logger.info(f"Successfully opened serial port: {device_path} at {baudrate} baud")
             return True
         except serial.SerialException as e:
@@ -498,28 +526,62 @@ class SerialManager:
         return False
     
     def reconfigure_hid_chip(self) -> bool:
-        """Reconfigure HID chip to default baudrate and mode"""
+        """Reconfigure HID chip to default baudrate while preserving other settings"""
         self.logger.info("Reconfiguring HID chip...")
         
-        # Build configuration command using predefined constants from CH9329 protocol
-        # This follows the official protocol specification exactly
-        # Command structure: CMD_SET_PARA_CFG_PREFIX + baudrate + CMD_SET_PARA_CFG_MID
+        # Step 1: Get current configuration
+        self.logger.info("Getting current chip configuration...")
+        config_bytes = self.send_sync_command(CMD_GET_PARA_CFG, force=True, timeout=3.0)
+        if not config_bytes or len(config_bytes) < 56:
+            self.logger.error("Failed to get current chip configuration")
+            return False
+        
+        # Step 2: Parse current configuration and modify only the baudrate
+        try:
+            # The response structure is: HEAD(2) + ADDR(1) + CMD(1) + LEN(1) + DATA(50) + SUM(1)
+            # We need to extract the 50 bytes of configuration data
+            if len(config_bytes) >= 56:
+                # Extract the 50 bytes of configuration data (bytes 5-54)
+                current_config = bytearray(config_bytes[5:55])
+                
+                self.logger.info(f"Current config length: {len(current_config)} bytes")
+                self.logger.debug(f"Current config: {current_config.hex(' ')}")
+                
+                # Modify only the baudrate (bytes 3-6 in the config data)
+                # Set baudrate to 115200 (big endian 32-bit)
+                baudrate_bytes = struct.pack('>I', 115200)
+                current_config[3:7] = baudrate_bytes
+                
+                # Ensure working mode is hardware mode (0x80)
+                current_config[0] = 0x80
+                
+                # Ensure serial communication mode is protocol transmission mode (0x00)
+                current_config[1] = 0x00
+                
+                self.logger.info("Modified config to set baudrate=115200, working_mode=0x80, serial_mode=0x00")
+                self.logger.debug(f"Modified config: {current_config.hex(' ')}")
+                
+            else:
+                self.logger.error(f"Configuration response too short: {len(config_bytes)} bytes")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Failed to parse current configuration: {e}")
+            return False
+        
+        # Step 3: Build CMD_SET_PARA_CFG command with modified configuration
+        # Command structure: HEAD(2) + ADDR(1) + CMD(1) + LEN(1) + DATA(50) + SUM(1)
         cmd = bytearray()
         
-        # Start with the predefined prefix: 57 AB 00 09 32 82 80 00 00 01 C2 00
-        # This contains: header, address, command, length, mode, and config bytes
-        cmd.extend(CMD_SET_PARA_CFG_PREFIX)
+        # Header: 57 AB 00 09 32 (HEAD + ADDR + CMD + LEN)
+        cmd.extend(bytes.fromhex("57 AB 00 09 32"))  # 50 bytes = 0x32
         
-        # Add baudrate (115200 as little endian 32-bit) - this is the only variable part
-        cmd.extend(struct.pack('<I', 115200))
+        # Add the modified configuration data
+        cmd.extend(current_config)
         
-        # Add the predefined middle part which contains all other configuration
-        # This includes: reserved bytes, package interval, VID (0x1a86), PID (0x29e1), 
-        # keyboard settings, timeouts, filters, and padding
-        cmd.extend(CMD_SET_PARA_CFG_MID)
-        
-        # Send the command
-        ret_bytes = self.send_sync_command(bytes(cmd), force=True)
+        # Step 4: Send the reconfiguration command
+        self.logger.info("Sending reconfiguration command...")
+        ret_bytes = self.send_sync_command(bytes(cmd), force=True, timeout=3.0)
         if ret_bytes:
             try:
                 result = CmdDataResult(ret_bytes)
@@ -528,10 +590,13 @@ class SerialManager:
                 if success:
                     self.logger.info("HID chip reconfigured successfully")
                 else:
+                    self.logger.error(f"HID chip reconfiguration failed with error: {hex(result.data)}")
                     dump_error(result.data, ret_bytes)
                 return success
             except Exception as e:
                 self.logger.error(f"Failed to parse reconfigure response: {e}")
+        else:
+            self.logger.error("No response received for reconfiguration command")
         
         return False
     
@@ -563,14 +628,48 @@ class SerialManager:
         return False
     
     def reset_hid_chip(self) -> bool:
-        """Reset HID chip"""
+        """Reset HID chip and reopen serial port"""
+        self.logger.info("Resetting HID chip...")
+        
+        # Save current port information
         port_name = self.ser_port.name if self.ser_port else None
-        if self.reconfigure_hid_chip():
-            self.close_port()
-            time.sleep(1)
-            if port_name and self.open_port(port_name, self.DEFAULT_BAUDRATE):
-                return self.send_reset_command()
-        return False
+        if not port_name:
+            self.logger.error("No serial port available for reset")
+            return False
+        
+        # Step 1: Send reconfigure command
+        if not self.reconfigure_hid_chip():
+            self.logger.error("Failed to reconfigure HID chip")
+            return False
+        
+        # Step 2: Close the port and wait for device to reset
+        self.logger.info("Closing port for device reset...")
+        self.close_port()
+        time.sleep(2)  # Give device more time to reset properly
+        
+        # Step 3: Reopen the port at the target baudrate
+        self.logger.info(f"Reopening port {port_name} after reset...")
+        if not self.open_port(port_name, self.DEFAULT_BAUDRATE):
+            self.logger.error(f"Failed to reopen port {port_name} after reset")
+            return False
+        
+        # Step 4: Verify the device is responding correctly
+        self.logger.info("Verifying device response after reset...")
+        ret_bytes = self.send_sync_command(CMD_GET_PARA_CFG, force=True, timeout=3.0)
+        if ret_bytes and len(ret_bytes) >= 56:
+            baudrate, working_mode, serial_mode = self._parse_config_baud_mode(ret_bytes)
+            self.logger.info(f"Device config after reset: baudrate={baudrate}, working_mode=0x{working_mode:02X}, serial_mode=0x{serial_mode:02X}")
+            
+            # Check if configuration is correct
+            if baudrate == self.DEFAULT_BAUDRATE and (serial_mode == 0x00 or serial_mode == 0x80):
+                self.logger.info("HID chip reset completed successfully")
+                return True
+            else:
+                self.logger.warning(f"Device configuration still incorrect after reset")
+                return False
+        else:
+            self.logger.error("No valid response from device after reset")
+            return False
     
     def set_command_delay(self, delay_ms: int):
         """Set delay between commands in milliseconds"""
@@ -664,7 +763,7 @@ class SerialManager:
         # Send key press
         success = self.send_keyboard_data(modifier_keys, [key_code])
         if success:
-            time.sleep(0.05)  # Small delay
+            # time.sleep(0.05)  # Small delay
             # Send key release
             success = self.send_keyboard_data(0, [])
         return success
@@ -933,4 +1032,4 @@ class SerialManager:
         cmd.extend([0, 0, 0, scroll_delta])  # buttons=0, x=0, y=0, wheel=scroll_delta
         
         return self.send_async_command(bytes(cmd), force=True)
-    
+
