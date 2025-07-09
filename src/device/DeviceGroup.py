@@ -8,7 +8,7 @@ import threading
 from device import DeviceFactory
 from device.AbstractDeviceManager import DeviceSelector
 from video import VideoFFmpeg
-from serialPort import SerialManager
+from serialPort.SerialManager import SerialManager
 from device import VideoHID
 from device.DeviceSocketServer import DeviceSocketServer
 from utils import logger

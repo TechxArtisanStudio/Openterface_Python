@@ -1,7 +1,7 @@
 import socket
 import json
 import threading
-from serialPort import SerialManager
+from serialPort.SerialManager import SerialManager
 
 
 class DeviceSocketServer:

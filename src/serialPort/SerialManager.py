@@ -5,6 +5,8 @@ import logging
 import struct
 from datetime import datetime
 from typing import Optional, Callable
+from .KeyboardManager import KeyboardManager
+from .MouseManager import MouseManager
 
 class SerialManager:
     # Constants
@@ -20,10 +22,9 @@ class SerialManager:
         self.is_switch_to_host = False
         self.is_target_usb_connected = False
         
-        # LED states
-        self.num_lock_state = False
-        self.caps_lock_state = False
-        self.scroll_lock_state = False
+        # Initialize keyboard and mouse managers
+        self.keyboard = KeyboardManager(self)
+        self.mouse = MouseManager(self)
         
         # Data callback
         self.data_ready_callback: Optional[Callable] = None
@@ -429,9 +430,7 @@ class SerialManager:
     
     def update_special_key_state(self, data: int):
         """Update special key states (Num Lock, Caps Lock, Scroll Lock)"""
-        self.num_lock_state = bool(data & 0x01)
-        self.caps_lock_state = bool(data & 0x02)
-        self.scroll_lock_state = bool(data & 0x04)
+        self.keyboard.update_special_key_state(data)
     
     def send_async_command(self, data: bytes, force: bool = False) -> bool:
         """Send asynchronous command"""
@@ -683,18 +682,6 @@ class SerialManager:
         """Set data ready callback function"""
         self.data_ready_callback = callback
     
-    def get_num_lock_state(self) -> bool:
-        """Get Num Lock state"""
-        return self.num_lock_state
-    
-    def get_caps_lock_state(self) -> bool:
-        """Get Caps Lock state"""
-        return self.caps_lock_state
-    
-    def get_scroll_lock_state(self) -> bool:
-        """Get Scroll Lock state"""
-        return self.scroll_lock_state
-    
     def is_ready(self) -> bool:
         """Check if serial manager is ready"""
         return self.ready and self.ser_port and self.ser_port.is_open
@@ -715,321 +702,43 @@ class SerialManager:
         """Destructor"""
         self.close_port()
     
-    def send_keyboard_data(self, modifier_keys: int, key_codes: list) -> bool:
-        """
-        Send keyboard data to the device
-        
-        Args:
-            modifier_keys: Bitmask for modifier keys according to CH9329 specification:
-                           Bit 0: Left Ctrl, Bit 1: Left Shift, Bit 2: Left Alt, Bit 3: Left Windows
-                           Bit 4: Right Ctrl, Bit 5: Right Shift, Bit 6: Right Alt, Bit 7: Right Windows
-            key_codes: List of up to 6 key codes to send (HID usage codes)
-        
-        Returns:
-            bool: True if command was sent successfully
-        """
-
-        # Ensure we don't exceed 6 key codes
-        key_codes = key_codes[:6]
-        
-        # Pad with zeros if less than 6 keys
-        while len(key_codes) < 6:
-            key_codes.append(0)
-        
-        # Build keyboard command according to CH9329 specification:
-        # HEAD: 0x57 0xAB, ADDR: 0x00, CMD: 0x02, LEN: 0x08
-        # DATA: modifier_keys + 0x00 (reserved) + 6 key codes
-        cmd = bytearray(CMD_SEND_KB_GENERAL_DATA)  # This is now "57 AB 00 02 08"
-        cmd.append(modifier_keys)    # Byte 0: Modifier keys
-        cmd.append(0x00)             # Byte 1: Reserved, always 0x00
-        
-        # Bytes 2-7: Up to 6 key codes
-        for key_code in key_codes:
-            cmd.append(key_code)
-        
-        return self.send_async_command(bytes(cmd), force=True)
+    # Convenience methods for backward compatibility
+    def send_text(self, text: str) -> bool:
+        """Send text by converting to key codes (convenience method)"""
+        return self.keyboard.send_text(text)
     
     def send_key_press(self, key_code: int, modifier_keys: int = 0) -> bool:
-        """
-        Send a single key press
-        
-        Args:
-            key_code: The key code to press
-            modifier_keys: Optional modifier keys (Ctrl=0x01, Shift=0x02, Alt=0x04, GUI=0x08)
-        
-        Returns:
-            bool: True if successful
-        """
-        # Send key press
-        success = self.send_keyboard_data(modifier_keys, [key_code])
-        if success:
-            # time.sleep(0.05)  # Small delay
-            # Send key release
-            success = self.send_keyboard_data(0, [])
-        return success
-    
-    def send_text(self, text: str) -> bool:
-        """
-        Send text by converting to key codes
-        
-        Args:
-            text: Text to send
-        
-        Returns:
-            bool: True if successful
-        """
-        if not self.is_ready():
-            return False
-        
-        for char in text:
-            key_code, modifier = self._char_to_keycode(char)
-            if key_code:
-                if not self.send_key_press(key_code, modifier):
-                    return False
-                time.sleep(0.02)  # Small delay between characters
-        
-        return True
-    
-    def _char_to_keycode(self, char: str) -> tuple:
-        """
-        Convert a character to HID key code and modifier
-        
-        Args:
-            char: Character to convert
-        
-        Returns:
-            tuple: (key_code, modifier)
-        """
-        # Basic ASCII to HID key code mapping
-        char_map = {
-            'a': (0x04, 0), 'b': (0x05, 0), 'c': (0x06, 0), 'd': (0x07, 0), 'e': (0x08, 0),
-            'f': (0x09, 0), 'g': (0x0A, 0), 'h': (0x0B, 0), 'i': (0x0C, 0), 'j': (0x0D, 0),
-            'k': (0x0E, 0), 'l': (0x0F, 0), 'm': (0x10, 0), 'n': (0x11, 0), 'o': (0x12, 0),
-            'p': (0x13, 0), 'q': (0x14, 0), 'r': (0x15, 0), 's': (0x16, 0), 't': (0x17, 0),
-            'u': (0x18, 0), 'v': (0x19, 0), 'w': (0x1A, 0), 'x': (0x1B, 0), 'y': (0x1C, 0),
-            'z': (0x1D, 0),
-            
-            'A': (0x04, 0x02), 'B': (0x05, 0x02), 'C': (0x06, 0x02), 'D': (0x07, 0x02), 'E': (0x08, 0x02),
-            'F': (0x09, 0x02), 'G': (0x0A, 0x02), 'H': (0x0B, 0x02), 'I': (0x0C, 0x02), 'J': (0x0D, 0x02),
-            'K': (0x0E, 0x02), 'L': (0x0F, 0x02), 'M': (0x10, 0x02), 'N': (0x11, 0x02), 'O': (0x12, 0x02),
-            'P': (0x13, 0x02), 'Q': (0x14, 0x02), 'R': (0x15, 0x02), 'S': (0x16, 0x02), 'T': (0x17, 0x02),
-            'U': (0x18, 0x02), 'V': (0x19, 0x02), 'W': (0x1A, 0x02), 'X': (0x1B, 0x02), 'Y': (0x1C, 0x02),
-            'Z': (0x1D, 0x02),
-            
-            '1': (0x1E, 0), '2': (0x1F, 0), '3': (0x20, 0), '4': (0x21, 0), '5': (0x22, 0),
-            '6': (0x23, 0), '7': (0x24, 0), '8': (0x25, 0), '9': (0x26, 0), '0': (0x27, 0),
-            
-            '!': (0x1E, 0x02), '@': (0x1F, 0x02), '#': (0x20, 0x02), '$': (0x21, 0x02), '%': (0x22, 0x02),
-            '^': (0x23, 0x02), '&': (0x24, 0x02), '*': (0x25, 0x02), '(': (0x26, 0x02), ')': (0x27, 0x02),
-            
-            '\n': (0x28, 0),  # Enter
-            '\t': (0x2B, 0),  # Tab
-            ' ': (0x2C, 0),   # Space
-            '-': (0x2D, 0), '_': (0x2D, 0x02),
-            '=': (0x2E, 0), '+': (0x2E, 0x02),
-            '[': (0x2F, 0), '{': (0x2F, 0x02),
-            ']': (0x30, 0), '}': (0x30, 0x02),
-            '\\': (0x31, 0), '|': (0x31, 0x02),
-            ';': (0x33, 0), ':': (0x33, 0x02),
-            "'": (0x34, 0), '"': (0x34, 0x02),
-            '`': (0x35, 0), '~': (0x35, 0x02),
-            ',': (0x36, 0), '<': (0x36, 0x02),
-            '.': (0x37, 0), '>': (0x37, 0x02),
-            '/': (0x38, 0), '?': (0x38, 0x02),
-        }
-        
-        return char_map.get(char, (0, 0))
+        """Send a single key press (convenience method)"""
+        return self.keyboard.send_key_press(key_code, modifier_keys)
     
     def send_key_combination(self, *keys) -> bool:
-        """
-        Send a key combination (e.g., Ctrl+C, Alt+Tab)
-        
-        Args:
-            *keys: Key names like 'ctrl', 'alt', 'shift', 'a', 'c', etc.
-        
-        Returns:
-            bool: True if successful
-        """
-        modifier = 0
-        key_codes = []
-        
-        # Special key mappings (HID usage codes)
-        special_keys = {
-            'enter': 0x28, 'return': 0x28,
-            'esc': 0x29, 'escape': 0x29,
-            'backspace': 0x2A,
-            'tab': 0x2B,
-            'space': 0x2C,
-            'capslock': 0x39,
-            'f1': 0x3A, 'f2': 0x3B, 'f3': 0x3C, 'f4': 0x3D, 'f5': 0x3E, 'f6': 0x3F,
-            'f7': 0x40, 'f8': 0x41, 'f9': 0x42, 'f10': 0x43, 'f11': 0x44, 'f12': 0x45,
-            'up': 0x52, 'down': 0x51, 'left': 0x50, 'right': 0x4F,
-            'home': 0x4A, 'end': 0x4D, 'pageup': 0x4B, 'pagedown': 0x4E,
-            'delete': 0x4C, 'insert': 0x49,
-        }
-        
-        for key in keys:
-            key = key.lower()
-            # CH9329 modifier bit mapping:
-            # Bit 0: Left Ctrl, Bit 1: Left Shift, Bit 2: Left Alt, Bit 3: Left Windows
-            # Bit 4: Right Ctrl, Bit 5: Right Shift, Bit 6: Right Alt, Bit 7: Right Windows
-            if key in ['ctrl', 'control']:
-                modifier |= 0x01  # Left Ctrl
-            elif key == 'shift':
-                modifier |= 0x02  # Left Shift
-            elif key == 'alt':
-                modifier |= 0x04  # Left Alt
-            elif key in ['gui', 'win', 'cmd']:
-                modifier |= 0x08  # Left Windows
-            elif key == 'rctrl':
-                modifier |= 0x10  # Right Ctrl
-            elif key == 'rshift':
-                modifier |= 0x20  # Right Shift
-            elif key == 'ralt':
-                modifier |= 0x40  # Right Alt
-            elif key == 'rwin':
-                modifier |= 0x80  # Right Windows
-            elif key in special_keys:
-                key_codes.append(special_keys[key])
-            elif len(key) == 1:
-                key_code, key_modifier = self._char_to_keycode(key)
-                if key_code:
-                    key_codes.append(key_code)
-                    modifier |= key_modifier
-        
-        # Send key combination
-        success = self.send_keyboard_data(modifier, key_codes)
-        if success:
-            time.sleep(0.05)
-            # Release keys
-            success = self.send_keyboard_data(0, [])
-        
-        return success
+        """Send a key combination (convenience method)"""
+        return self.keyboard.send_key_combination(*keys)
     
     def send_mouse_move_relative(self, delta_x: int, delta_y: int, buttons: int = 0) -> bool:
-        """
-        Send relative mouse movement
-        
-        Args:
-            delta_x: X movement (-127 to 127)
-            delta_y: Y movement (-127 to 127)
-            buttons: Mouse button state (bit 0=left, bit 1=right, bit 2=middle)
-        
-        Returns:
-            bool: True if successful
-        """
-        if not self.is_ready():
-            self.logger.error("Device not ready for mouse input")
-            return False
-        
-        # Clamp values to valid range
-        delta_x = max(-127, min(127, delta_x))
-        delta_y = max(-127, min(127, delta_y))
-        
-        # Convert negative values to signed bytes
-        if delta_x < 0:
-            delta_x = 256 + delta_x
-        if delta_y < 0:
-            delta_y = 256 + delta_y
-        
-        # Build mouse relative movement command
-        cmd = bytearray(MOUSE_REL_ACTION_PREFIX)
-        cmd.extend([buttons, delta_x, delta_y, 0])  # buttons, x, y, wheel
-        
-        return self.send_async_command(bytes(cmd), force=True)
+        """Send relative mouse movement (convenience method)"""
+        return self.mouse.send_mouse_move_relative(delta_x, delta_y, buttons)
     
     def send_mouse_move_absolute(self, x: int, y: int, buttons: int = 0) -> bool:
-        """
-        Send absolute mouse positioning
-        
-        Args:
-            x: X coordinate (0-32767)
-            y: Y coordinate (0-32767)
-            buttons: Mouse button state (bit 0=left, bit 1=right, bit 2=middle)
-        
-        Returns:
-            bool: True if successful
-        """
-        if not self.is_ready():
-            self.logger.error("Device not ready for mouse input")
-            return False
-        
-        # Clamp values to valid range
-        x = max(0, min(32767, x))
-        y = max(0, min(32767, y))
-        
-        # Convert to little endian 16-bit values
-        x_bytes = struct.pack('<H', x)
-        y_bytes = struct.pack('<H', y)
-        
-        # Build mouse absolute positioning command
-        cmd = bytearray(MOUSE_ABS_ACTION_PREFIX)
-        cmd.extend([buttons])  # Mouse buttons
-        cmd.extend(x_bytes)    # X coordinate (2 bytes)
-        cmd.extend(y_bytes)    # Y coordinate (2 bytes)
-        cmd.extend([0])        # Wheel
-        
-        return self.send_async_command(bytes(cmd), force=True)
+        """Send absolute mouse positioning (convenience method)"""
+        return self.mouse.send_mouse_move_absolute(x, y, buttons)
     
     def send_mouse_click(self, button: str = "left", double_click: bool = False) -> bool:
-        """
-        Send mouse click
-        
-        Args:
-            button: "left", "right", or "middle"
-            double_click: Whether to perform a double click
-        
-        Returns:
-            bool: True if successful
-        """
-        button_map = {
-            "left": 0x01,
-            "right": 0x02,
-            "middle": 0x04
-        }
-        
-        button_code = button_map.get(button.lower(), 0x01)
-        
-        # Press button
-        success = self.send_mouse_move_relative(0, 0, button_code)
-        if success:
-            time.sleep(0.05)
-            # Release button
-            success = self.send_mouse_move_relative(0, 0, 0)
-            
-            if double_click and success:
-                time.sleep(0.05)
-                # Second click
-                success = self.send_mouse_move_relative(0, 0, button_code)
-                if success:
-                    time.sleep(0.05)
-                    success = self.send_mouse_move_relative(0, 0, 0)
-        
-        return success
+        """Send mouse click (convenience method)"""
+        return self.mouse.send_mouse_click(button, double_click)
     
     def send_mouse_scroll(self, scroll_delta: int) -> bool:
-        """
-        Send mouse scroll wheel movement
-        
-        Args:
-            scroll_delta: Scroll amount (-127 to 127, positive = up, negative = down)
-        
-        Returns:
-            bool: True if successful
-        """
-        if not self.is_ready():
-            return False
-        
-        # Clamp to valid range
-        scroll_delta = max(-127, min(127, scroll_delta))
-        
-        # Convert negative values to signed bytes
-        if scroll_delta < 0:
-            scroll_delta = 256 + scroll_delta
-        
-        # Build mouse scroll command
-        cmd = bytearray(MOUSE_REL_ACTION_PREFIX)
-        cmd.extend([0, 0, 0, scroll_delta])  # buttons=0, x=0, y=0, wheel=scroll_delta
-        
-        return self.send_async_command(bytes(cmd), force=True)
-
+        """Send mouse scroll wheel movement (convenience method)"""
+        return self.mouse.send_mouse_scroll(scroll_delta)
+    
+    def get_num_lock_state(self) -> bool:
+        """Get Num Lock state (convenience method)"""
+        return self.keyboard.num_lock_state
+    
+    def get_caps_lock_state(self) -> bool:
+        """Get Caps Lock state (convenience method)"""
+        return self.keyboard.caps_lock_state
+    
+    def get_scroll_lock_state(self) -> bool:
+        """Get Scroll Lock state (convenience method)"""
+        return self.keyboard.scroll_lock_state

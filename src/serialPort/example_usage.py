@@ -46,9 +46,9 @@ def main():
             while True:
                 if serial_manager.is_ready():
                     print(f"Device Status:")
-                    print(f"  Num Lock: {serial_manager.get_num_lock_state()}")
-                    print(f"  Caps Lock: {serial_manager.get_caps_lock_state()}")
-                    print(f"  Scroll Lock: {serial_manager.get_scroll_lock_state()}")
+                    print(f"  Num Lock: {serial_manager.keyboard.num_lock_state}")
+                    print(f"  Caps Lock: {serial_manager.keyboard.caps_lock_state}")
+                    print(f"  Scroll Lock: {serial_manager.keyboard.scroll_lock_state}")
                     
                     # Send info command to refresh status
                     serial_manager.send_async_command(CMD_GET_INFO)

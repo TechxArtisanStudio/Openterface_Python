@@ -6,7 +6,7 @@ This example demonstrates how to send keyboard and mouse input to the target dev
 
 import logging
 import time
-from SerialManager import SerialManager
+from serialPort.SerialManager import SerialManager
 
 # Configure logging
 logging.basicConfig(
@@ -31,35 +31,35 @@ def keyboard_examples(serial_manager):
     # Example 1: Send simple text
     wait_for_user("Example 1: Send simple text 'Hello World!'")
     print("Sending text: 'Hello World!'")
-    serial_manager.send_text("Hello World!")
+    serial_manager.keyboard.send_text("Hello World!")
     time.sleep(1)
     
     # Example 2: Send text with Enter
     wait_for_user("Example 2: Send text with Enter key")
     print("Sending: 'This is a new line' + Enter")
-    serial_manager.send_text("This is a new line\n")
+    serial_manager.keyboard.send_text("This is a new line\n")
     time.sleep(1)
     
     # Example 3: Key combinations
     wait_for_user("Example 3: Send Ctrl+A (Select All)")
     print("Sending: Ctrl+A")
-    serial_manager.send_key_combination("ctrl", "a")
+    serial_manager.keyboard.send_key_combination("ctrl", "a")
     time.sleep(1)
     
     wait_for_user("Example 4: Send Ctrl+C (Copy)")
     print("Sending: Ctrl+C")
-    serial_manager.send_key_combination("ctrl", "c")
+    serial_manager.keyboard.send_key_combination("ctrl", "c")
     time.sleep(1)
     
     wait_for_user("Example 5: Send Ctrl+V (Paste)")
     print("Sending: Ctrl+V")
-    serial_manager.send_key_combination("ctrl", "v")
+    serial_manager.keyboard.send_key_combination("ctrl", "v")
     time.sleep(1)
     
     # Example 4: Function keys
     wait_for_user("Example 6: Send F1 key")
     print("Sending: F1")
-    serial_manager.send_key_combination("f1")
+    serial_manager.keyboard.send_key_combination("f1")
     time.sleep(1)
     
     # Example 5: Arrow keys
@@ -67,25 +67,25 @@ def keyboard_examples(serial_manager):
     print("Sending arrow keys...")
     for direction in ["up", "down", "left", "right"]:
         print(f"  {direction.capitalize()} arrow")
-        serial_manager.send_key_combination(direction)
+        serial_manager.keyboard.send_key_combination(direction)
         time.sleep(0.5)
     
     # Example 6: Alt+Tab
     wait_for_user("Example 8: Send Alt+Tab (Switch windows)")
     print("Sending: Alt+Tab")
-    serial_manager.send_key_combination("alt", "tab")
+    serial_manager.keyboard.send_key_combination("alt", "tab")
     time.sleep(1)
     
     # Example 7: Special characters
     wait_for_user("Example 9: Send special characters")
     print("Sending: !@#$%^&*()")
-    serial_manager.send_text("!@#$%^&*()")
+    serial_manager.keyboard.send_text("!@#$%^&*()")
     time.sleep(1)
     
     # Example 8: Backspace
     wait_for_user("Example 10: Send Backspace key")
     print("Sending: Backspace")
-    serial_manager.send_key_combination("backspace")
+    serial_manager.keyboard.send_key_combination("backspace")
     time.sleep(1)
 
 def mouse_examples(serial_manager):
@@ -104,53 +104,53 @@ def mouse_examples(serial_manager):
     movements = [(100, 0), (0, 100), (-100, 0), (0, -100)]
     for dx, dy in movements:
         print(f"  Moving by ({dx}, {dy})")
-        serial_manager.send_mouse_move_relative(dx, dy)
+        serial_manager.mouse.send_mouse_move_relative(dx, dy)
         time.sleep(0.5)
     
     # Example 2: Mouse clicks
     wait_for_user("Example 2: Mouse clicks")
     print("Left click...")
-    serial_manager.send_mouse_click("left")
+    serial_manager.mouse.send_mouse_click("left")
     time.sleep(1)
     
     print("Right click...")
-    serial_manager.send_mouse_click("right")
+    serial_manager.mouse.send_mouse_click("right")
     time.sleep(1)
     
     print("Middle click...")
-    serial_manager.send_mouse_click("middle")
+    serial_manager.mouse.send_mouse_click("middle")
     time.sleep(1)
     
     # Example 3: Double click
     wait_for_user("Example 3: Double click")
     print("Double clicking...")
-    serial_manager.send_mouse_click("left", double_click=True)
+    serial_manager.mouse.send_mouse_click("left", double_click=True)
     time.sleep(1)
     
     # Example 4: Mouse scroll
     wait_for_user("Example 4: Mouse scroll")
     print("Scrolling up...")
     for i in range(3):
-        serial_manager.send_mouse_scroll(3)
+        serial_manager.mouse.send_mouse_scroll(3)
         time.sleep(0.3)
     
     time.sleep(1)
     print("Scrolling down...")
     for i in range(3):
-        serial_manager.send_mouse_scroll(-3)
+        serial_manager.mouse.send_mouse_scroll(-3)
         time.sleep(0.3)
     
     # Example 5: Absolute positioning
     wait_for_user("Example 5: Absolute mouse positioning")
     print("Moving to center of screen (assuming 1920x1080)...")
-    serial_manager.send_mouse_move_absolute(960, 540)
+    serial_manager.mouse.send_mouse_move_absolute(960, 540)
     time.sleep(1)
     
     print("Moving to corners...")
     corners = [(0, 0), (1920, 0), (1920, 1080), (0, 1080)]
     for x, y in corners:
         print(f"  Moving to ({x}, {y})")
-        serial_manager.send_mouse_move_absolute(x, y)
+        serial_manager.mouse.send_mouse_move_absolute(x, y)
         time.sleep(0.8)
 
 def advanced_examples(serial_manager):
@@ -166,15 +166,15 @@ def advanced_examples(serial_manager):
     # Example 1: Open Run dialog and type command
     wait_for_user("Example 1: Open Windows Run dialog and type 'notepad'")
     print("Pressing Win+R...")
-    serial_manager.send_key_combination("win", "r")
+    serial_manager.keyboard.send_key_combination("win", "r")
     time.sleep(2)
     
     print("Typing 'notepad'...")
-    serial_manager.send_text("notepad")
+    serial_manager.keyboard.send_text("notepad")
     time.sleep(1)
     
     print("Pressing Enter...")
-    serial_manager.send_key_combination("enter")
+    serial_manager.keyboard.send_key_combination("enter")
     time.sleep(2)
     
     # Example 2: Type in notepad and save
@@ -192,33 +192,33 @@ Features demonstrated:
 Time: """ + time.strftime("%Y-%m-%d %H:%M:%S")
     
     print("Typing multi-line text...")
-    serial_manager.send_text(text)
+    serial_manager.keyboard.send_text(text)
     time.sleep(2)
     
     # Example 3: Save file with Ctrl+S
     wait_for_user("Example 3: Save file with Ctrl+S")
     print("Pressing Ctrl+S...")
-    serial_manager.send_key_combination("ctrl", "s")
+    serial_manager.keyboard.send_key_combination("ctrl", "s")
     time.sleep(2)
     
     print("Typing filename 'openterface_test.txt'...")
-    serial_manager.send_text("openterface_test.txt")
+    serial_manager.keyboard.send_text("openterface_test.txt")
     time.sleep(1)
     
     print("Pressing Enter to save...")
-    serial_manager.send_key_combination("enter")
+    serial_manager.keyboard.send_key_combination("enter")
     time.sleep(1)
     
     # Example 4: Mouse and keyboard combination
     wait_for_user("Example 4: Mouse and keyboard combination - select text")
     print("Pressing Ctrl+A to select all...")
-    serial_manager.send_key_combination("ctrl", "a")
+    serial_manager.keyboard.send_key_combination("ctrl", "a")
     time.sleep(1)
     
     print("Moving mouse and clicking...")
-    serial_manager.send_mouse_move_relative(50, 50)
+    serial_manager.mouse.send_mouse_move_relative(50, 50)
     time.sleep(0.5)
-    serial_manager.send_mouse_click("left")
+    serial_manager.mouse.send_mouse_click("left")
     time.sleep(1)
 
 def main():
@@ -261,7 +261,7 @@ def main():
                 advanced_examples(serial_manager)
             elif choice == "4":
                 print("Quick test: Sending 'Hello World!'")
-                serial_manager.send_text("Hello World!\n")
+                serial_manager.keyboard.send_text("Hello World!\n")
                 print("Done!")
             elif choice == "5":
                 break
