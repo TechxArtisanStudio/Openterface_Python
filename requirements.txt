@@ -1,5 +1,5 @@
 python-ffmpeg == 2.0.12
 hidapi == 0.14.0.post4
 pyserial == 3.5
-# linux
+# Linux dependencies
 pyudev == 0.24.3

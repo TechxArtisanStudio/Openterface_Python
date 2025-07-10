@@ -27,8 +27,8 @@ def create_device_manager(serial_vid: str, serial_pid: str, hid_vid: str, hid_pi
         from device.DeviceGroupsWin import WindowsDeviceManager
         return WindowsDeviceManager(serial_vid, serial_pid, hid_vid, hid_pid)
     elif system == "linux":
-        # TODO: Implement Linux device manager
-        raise NotImplementedError("Linux device manager not yet implemented")
+        from device.DeviceGroupsLinux import LinuxDeviceManager
+        return LinuxDeviceManager(serial_vid, serial_pid, hid_vid, hid_pid)
     elif system == "darwin":  # macOS
         # TODO: Implement macOS device manager
         raise NotImplementedError("macOS device manager not yet implemented")
@@ -61,8 +61,9 @@ def create_hotplug_monitor(serial_vid: str, serial_pid: str, hid_vid: str, hid_p
         device_manager = WindowsDeviceManager(serial_vid, serial_pid, hid_vid, hid_pid)
         return WindowsHotplugMonitor(device_manager, poll_interval)
     elif system == "linux":
-        # TODO: Implement Linux hotplug monitor
-        raise NotImplementedError("Linux hotplug monitor not yet implemented")
+        from device.DeviceGroupsLinux import LinuxDeviceManager, LinuxHotplugMonitor
+        device_manager = LinuxDeviceManager(serial_vid, serial_pid, hid_vid, hid_pid)
+        return LinuxHotplugMonitor(device_manager, poll_interval)
     elif system == "darwin":  # macOS
         # TODO: Implement macOS hotplug monitor
         raise NotImplementedError("macOS hotplug monitor not yet implemented")
@@ -106,7 +107,7 @@ def create_openterface_device_selector() -> DeviceSelector:
 # Platform detection utilities
 def get_supported_platforms():
     """Get list of supported platforms"""
-    return ["windows"]  # TODO: Add "linux", "darwin" when implemented
+    return ["windows", "linux"]  # TODO: Add "darwin" when implemented
 
 
 def is_platform_supported(platform_name: Optional[str] = None) -> bool:
